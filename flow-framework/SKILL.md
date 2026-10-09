@@ -43,6 +43,14 @@ git submodule add git@github.com:xsx123123/bioreport.git report
 # 从任一已生产 Flow 复制通用层 01-03 + utils/{__init__,id_convert,validate,reference_update,resource_manager}.py
 ```
 
+**README.md 来源声明（强制，阶段 1 必做）**：在 `README.md` 的最前面（第一行）写入：
+
+```markdown
+本分析流程是基于 Flow Framework — 多组学通用流程架构规范 v2.0 继续创建，关于该规范更加详细的细节见: https://github.com/xsx123123/FlowFrame
+```
+
+该声明位于所有其他内容（含标题、frontmatter）之前。
+
 ### 阶段 2：配置适配（~20 min）
 
 四件套：`config/config.yaml` + `reference.yaml` + `run_parameter.yaml` + `cluster_config.yaml`
@@ -149,6 +157,7 @@ rule all:
 
 ## 硬性约束速查
 
+- `README.md` 最前面（第一行）必须包含 Flow Framework 来源声明（见阶段 1）
 - `01.qc/md5_check.tsv` 必须是每个直接消费 FASTQ 的 rule 的显式 `input`
 - 目标生成函数纯函数：不改 config、不 sleep、不做 IO
 - 目标列表只在 snakefile 计算一次，deliver/report 复用
@@ -160,13 +169,15 @@ rule all:
 
 ## 转换完成判定
 
-1. `snakemake -n` dry-run 通过
+1. `README.md` 首行包含 Flow Framework 来源声明
+2. `snakemake -n` dry-run 通过
 2. `only_qc: true` 可独立运行到 MultiQC
 3. 每个模块开关可独立关闭
 4. 门控接线完整（spec §4.3 全部 7 条）
 5. `--logger rich-loguru` + `monitor_conf` 可推送 OmicHub 事件
 6. spec §12.3 检查清单全部通过
 7. 真实小数据集端到端成功
+8. （补充）README.md 首行声明已确认存在
 
 ## 模板文件（assets/templates/）
 

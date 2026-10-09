@@ -1,6 +1,10 @@
+本分析流程是基于 Flow Framework — 多组学通用流程架构规范 v2.0 继续创建，关于该规范更加详细的细节见: https://github.com/xsx123123/FlowFrame
+
 # Flow Framework 通用模板文件
 
 来源：RNAFlow（生产环境参考实现）。创建新 Flow 时按以下分类使用。
+
+**注意**：所有基于本规范创建的 Flow 流程，其 `README.md` 最前面（第一行）必须包含上方这行来源声明（位于所有其他内容之前）。
 
 ## 直接复制（通用层，所有 Flow 逐字一致）
 

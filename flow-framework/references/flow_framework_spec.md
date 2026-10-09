@@ -35,6 +35,7 @@
 
 ```text
 <X>Flow/
+├── README.md                        # 必须存在，首行为 Flow Framework 来源声明（见下）
 ├── snakefile                        # 入口（小写，必须存在）
 ├── config/
 │   ├── config.yaml                  # 默认配置（software、raw_data、模块开关默认值）
@@ -74,6 +75,11 @@
 
 命名与仓库卫生细则：
 
+- **README.md 来源声明（强制）**：所有基于本规范创建的 Flow 流程，其 `README.md` 文件的**最前面**（第一行）必须添加以下声明：
+
+  > 本分析流程是基于 Flow Framework — 多组学通用流程架构规范 v2.0 继续创建，关于该规范更加详细的细节见: https://github.com/xsx123123/FlowFrame
+
+  该声明必须位于所有其他内容（含标题、frontmatter）之前；README 其余部分再按常规写流程简介、使用方法等。
 - rule 文件必须为 `NN.snake_case.smk`（编号两位、连续、不跳号、不允许同序号两个文件）。例外：收尾报告允许 `N.Report.smk`。
 - env 文件必须全小写 `.yaml`（禁止 `.yml`、大写开头）；一个工具一个环境，禁止重复环境并存。
 - 仓库根目录禁止存在项目级 `config.yaml`（项目配置一律走 `examples/analysisyaml.example.yaml` + `--config analysisyaml=`）。
@@ -1158,6 +1164,7 @@ snakemake -s snakefile --dag --config analysisyaml=/path/to/config.yaml | dot -T
 
 ### 12.3 新流程开发检查清单
 
+- [ ] `README.md` 存在且最前面（第一行）为 Flow Framework 来源声明（§1.3）
 - [ ] `snakefile` 存在且遵循 8 步初始化序列
 - [ ] `schema/config.schema.yaml` 存在、含 `required`、与本流程真实配置结构对齐，且在 snakefile 中调用
 - [ ] `rules/utils/__init__.py` 存在
@@ -1439,6 +1446,13 @@ cp src/src/md5/seq_preprocessor/target/release/seq_preprocessor \
    src/src/md5/Compile_release/seq_preprocessor_x86_64/release/
 cp src/src/md5/json_md5_verifier/target/release/json_md5_verifier \
    src/src/md5/Compile_release/json_md5_verifier_x86_64/release/
+
+# 7. 创建 README.md（最前面必须为来源声明，强制）
+cat > README.md << 'RD'
+本分析流程是基于 Flow Framework — 多组学通用流程架构规范 v2.0 继续创建，关于该规范更加详细的细节见: https://github.com/xsx123123/FlowFrame
+
+# <X>Flow
+RD
 ```
 
 ### 16.4 阶段 2：配置适配
@@ -1666,3 +1680,4 @@ snakemake -s snakefile --cores 8 --use-conda --logger rich-loguru \
 5. `--logger rich-loguru` + `monitor_conf=monitor_config.yaml` 可推送事件到 OmicHub
 6. §12.3 检查清单全部勾选
 7. 至少一个真实小数据集端到端运行成功
+8. `README.md` 最前面包含 Flow Framework 来源声明（§1.3）

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/蓝色基因数据分析图标.png" alt="蓝色基因数据分析图标" width="250">
+</p>
+
 # Flow Framework — 多组学通用流程架构规范 v2.0
 
 本文档是 Flow 家族流程的**强制架构规范**。所有 Flow 系列流程（RNAFlow、SCRNAFlow、BTCRFlow、ATACFlow、WGSFlow 等）必须遵循此规范。新流程开发以此为蓝本，已有流程按 §15 对齐清单逐步收敛。

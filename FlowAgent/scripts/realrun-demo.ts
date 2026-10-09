@@ -1,11 +1,12 @@
 /**
- * demo 真实运行:走后端真实工具路径 dry_run → submit_cluster(后台 snakemake --use-conda)。
+ * demo 真实运行:走后端真实工具路径 dry_run → 人工确认落账 → submit_cluster(后台 snakemake --use-conda)。
  * 首次会构建 fastqc/multiqc conda 环境,耗时几分钟。
  * 用法:FLOWAGENT_ALLOW_SUBMIT=true npm run demo:run
+ * (执行本命令即代表你本人批准提交,脚本会把 human_decision 记录写入台账)
  */
 import { loadConfig } from '../src/config';
 import { createTools } from '../src/tools';
-import { hasSuccessfulDryRun } from '../src/ledger';
+import { appendLedger, hasSuccessfulDryRun, hasUnconsumedApproval } from '../src/ledger';
 
 const target = process.argv[2] ?? '01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html';
 const taskId = 'demo_realrun';
@@ -17,7 +18,7 @@ async function main() {
   console.log(`root: ${cfg.workflowRoot}\ntarget: ${target}\n`);
 
   if (!hasSuccessfulDryRun(cfg.workflowRoot, taskId, [target])) {
-    console.log('[1/2] dry_run(含 --use-conda)...');
+    console.log('[1/3] dry_run(含 --use-conda)...');
     const d: any = await tools.dry_run.execute!({ task_id: taskId, targets: [target] }, ctx);
     console.log(`dry_run ok = ${d.ok}`);
     if (!d.ok) {
@@ -25,12 +26,27 @@ async function main() {
       process.exit(1);
     }
   } else {
-    console.log('[1/2] 台账已有本任务 dry-run 成功记录,跳过');
+    console.log('[1/3] 台账已有本任务 dry-run 成功记录,跳过');
   }
 
-  console.log('[2/2] submit_cluster...');
+  if (!hasUnconsumedApproval(cfg.workflowRoot, taskId, [target])) {
+    console.log('[2/3] 人工确认:执行本命令即视为你本人批准,写入 human_decision 台账(每次提交消耗一次)...');
+    appendLedger(cfg.workflowRoot, {
+      ts: new Date().toISOString(),
+      task_id: taskId,
+      op: 'human_decision',
+      target,
+      object: '.',
+      result: 'approved',
+      detail: 'demo:run 脚本执行即人工确认 by=cli-user',
+    });
+  } else {
+    console.log('[2/3] 台账已有本任务人工确认记录,跳过');
+  }
+
+  console.log('[3/3] submit_cluster...');
   const r: any = await tools.submit_cluster.execute!(
-    { task_id: taskId, targets: [target], confirmed: true },
+    { task_id: taskId, targets: [target], reason: 'demo:run 脚本:dry-run 已通过且人工确认已落账' },
     ctx,
   );
   console.log(JSON.stringify(r, null, 2));

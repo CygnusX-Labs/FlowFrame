@@ -24,9 +24,23 @@ export interface FlowAgentConfig {
   baseURL: string;
   apiKey: string;
   model: string;
+  /** 专家模式模型 ID(mode 由请求携带,不进 env;缺省回退 model) */
+  modelExpert: string;
   /** Flow 流程仓库根目录(rules/ agent/ config/ 所在) */
   workflowRoot: string;
+  /** server 绑定地址:默认 127.0.0.1(仅本机),对局域网开放时显式设 0.0.0.0 */
+  host: string;
   port: number;
+  /**
+   * Bearer 鉴权 token:设置后 /api/chat 与 /api/mode 要求 Authorization: Bearer <token>。
+   * 不设置时不鉴权(仅靠默认绑定 127.0.0.1 限制暴露面)。
+   */
+  authToken: string;
+  /**
+   * CORS 允许来源:'*' 恢复全开;显式列表精确匹配;缺省为 localhost/127.0.0.1 任意端口。
+   * 上一版本为 Access-Control-Allow-Origin: *(任意网页可 drive-by 调用本服务并伪造人工确认)。
+   */
+  allowedOrigins: string[] | '*';
   /** 即使为 true,submit_cluster 仍受 dry-run 台账硬约束限制 */
   allowSubmit: boolean;
   cores: number;
@@ -37,13 +51,26 @@ export interface FlowAgentConfig {
   extraArgs: string[];
 }
 
+/** 会话模式:standard=员工(按需执行);expert=专家(主动体检/提案起草/扩展修复策略) */
+export type AgentMode = 'standard' | 'expert';
+
 export function loadConfig(): FlowAgentConfig {
   return {
     baseURL: process.env.FLOWAGENT_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/v3',
     apiKey: process.env.FLOWAGENT_API_KEY ?? process.env.ARK_API_KEY ?? '',
     model: process.env.FLOWAGENT_MODEL ?? 'doubao-seed-1-6-250615',
+    modelExpert: process.env.FLOWAGENT_MODEL_EXPERT ?? '',
     workflowRoot: path.resolve(process.env.FLOW_WORKFLOW_ROOT ?? path.join(PACKAGE_ROOT, 'demo')),
+    host: process.env.FLOWAGENT_HOST ?? '127.0.0.1',
     port: Number(process.env.FLOWAGENT_PORT ?? 3090),
+    authToken: process.env.FLOWAGENT_AUTH_TOKEN ?? '',
+    allowedOrigins:
+      process.env.FLOWAGENT_ALLOWED_ORIGINS === '*'
+        ? '*'
+        : (process.env.FLOWAGENT_ALLOWED_ORIGINS ?? '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
     allowSubmit: process.env.FLOWAGENT_ALLOW_SUBMIT === 'true',
     cores: Number(process.env.FLOWAGENT_CORES ?? 8),
     useConda: process.env.FLOWAGENT_USE_CONDA !== 'false',

@@ -41,8 +41,13 @@ rules:
         pattern: "00.raw_data/link_dir/raw_data_md5.json"
         kind: intermediate
     config_requires:
-      - "convert_md5"
+      - key: "convert_md5"
+        type: "string"
+        enum: ["link_dir"]
+        default: "link_dir"
+        description: "标准化方式(软链接零拷贝)"
       - "general_software.seq_preprocessor"
+    resources_tier: "low_resource"
 
   - name: check_md5
     summary: "json_md5_verifier 重算全部链接文件 MD5 并比对,产出硬性门控文件 md5_check.tsv;任一 FAIL 非零退出"
@@ -68,3 +73,4 @@ rules:
         kind: intermediate
     config_requires:
       - "general_software.check_md5"
+    resources_tier: "low_resource"

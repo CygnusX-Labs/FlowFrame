@@ -1,0 +1,67 @@
+# eval/cases.yaml —— LLM 在环回归评测集(审核手册阶段 3)
+# 用途:区分「rule 库退化」与「LLM 组装退化」。rule 库新增 rule、改 system prompt、
+# 改端口签名结构后各跑一遍 scripts/run-eval.ts,比对命中率变化。
+# expect 三种:
+#   kind: catalog    —— 期望直接命中 deliverable(不生成组合)
+#   kind: composed   —— 期望走组装,use rule 链包含 rules_contain 里的名字(子串匹配)
+#   kind: gap        —— 期望记录缺口,missing 匹配 missing_regex
+cases:
+  - id: catalog_r2_multiqc
+    need: "对这批样本出原始数据 R2 的 MultiQC 质控报告"
+    expect:
+      kind: catalog
+      deliverable: raw_multiqc_r2
+
+  - id: catalog_r1_multiqc
+    need: "我要 R1 的质控汇总报告"
+    expect:
+      kind: catalog
+      deliverable: raw_multiqc_r1
+
+  - id: catalog_synonym_full
+    need: "帮我做一下这批数据的完整质检"
+    expect:
+      kind: catalog
+      deliverable: raw_multiqc_all
+
+  - id: composed_r1_fastqc_only
+    need: "只要每个样本 R1 的 FastQC 单样本报告,不要 MultiQC 聚合"
+    expect:
+      kind: composed
+      rules_contain: ["short_read_qc_r1", "seq_preprocessor", "check_md5"]
+
+  - id: composed_r2_fastqc_only
+    need: "只跑 R2 方向的 FastQC,不需要聚合报告"
+    expect:
+      kind: composed
+      rules_contain: ["short_read_qc_r2", "seq_preprocessor", "check_md5"]
+
+  - id: composed_multiqc_r2
+    need: "把 R2 的 FastQC 结果聚合成一份 MultiQC 报告"
+    expect:
+      kind: composed
+      rules_contain: ["short_read_multiqc_r2", "short_read_qc_r2"]
+
+  - id: gap_diff_expr
+    need: "对这批样本做差异表达分析"
+    expect:
+      kind: gap
+      missing_regex: "diff|表达"
+
+  - id: gap_variant_calling
+    need: "call 这批样本的 SNP"
+    expect:
+      kind: gap
+      missing_regex: "variant|snp|call"
+
+  - id: gap_fusion
+    need: "检测基因融合"
+    expect:
+      kind: gap
+      missing_regex: "fusion|融合"
+
+  - id: gap_alignment
+    need: "把 reads 比对到参考基因组"
+    expect:
+      kind: gap
+      missing_regex: "align|bam|比对"

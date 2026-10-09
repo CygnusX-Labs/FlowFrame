@@ -8,6 +8,7 @@
     "cli": "tsx src/cli.ts",
     "server": "tsx src/server.ts",
     "selftest": "tsx scripts/selftest.ts",
+    "eval": "tsx scripts/run-eval.ts",
     "demo:run": "tsx scripts/realrun-demo.ts",
     "typecheck": "tsc --noEmit"
   },

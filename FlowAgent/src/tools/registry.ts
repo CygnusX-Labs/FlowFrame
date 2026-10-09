@@ -64,9 +64,9 @@ export function createRegistryTools(cfg: FlowAgentConfig) {
 
   const query_catalog = tool({
     description:
-      '查询产物目录 agent/catalog.yaml:用户会直接开口要的最终交付物(deliverable)及其 snakemake target 路径。SOP 第一步。返回紧凑摘要。',
+      '查询产物目录 agent/catalog.yaml:用户会直接开口要的最终交付物(deliverable)及其 snakemake target 路径。SOP 第一步。关键词同时匹配 name/description/keywords/synonyms(同义词表,防漏召回)。返回紧凑摘要。',
     inputSchema: z.object({
-      keyword: z.string().optional().describe('关键词过滤(匹配 name/description/keywords),省略返回全部'),
+      keyword: z.string().optional().describe('关键词过滤(匹配 name/description/keywords/synonyms),省略返回全部'),
     }),
     execute: async ({ keyword }) => {
       const file = path.join(root, 'agent', 'catalog.yaml');
@@ -77,7 +77,10 @@ export function createRegistryTools(cfg: FlowAgentConfig) {
       const hit = items.filter(
         (d) =>
           !kw ||
-          [d.name, d.description, ...(d.keywords ?? [])].join(' ').toLowerCase().includes(kw),
+          [d.name, d.description, ...(d.keywords ?? []), ...(d.synonyms ?? []), ...(d.tags ?? [])]
+            .join(' ')
+            .toLowerCase()
+            .includes(kw),
       );
       return {
         ok: true,
@@ -88,6 +91,7 @@ export function createRegistryTools(cfg: FlowAgentConfig) {
           description: d.description,
           targets: d.targets,
           keywords: d.keywords,
+          synonyms: d.synonyms,
         })),
       };
     },

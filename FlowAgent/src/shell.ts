@@ -36,6 +36,7 @@ export function spawnDetached(
   const out = fs.openSync(opts.logFile, 'a');
   const child = spawn(cmd, args, { cwd: opts.cwd, detached: true, stdio: ['ignore', out, out] });
   child.unref();
+  fs.closeSync(out); // 子进程已继承 fd,父进程及时关闭,防每次 submit 泄漏一个 fd
   return child.pid ?? -1;
 }
 

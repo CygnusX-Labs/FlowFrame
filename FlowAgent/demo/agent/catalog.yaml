@@ -1,4 +1,5 @@
 # agent/catalog.yaml —— Agent 回答「我要 X 结果」时的查询入口;中间产物不进本文件
+# synonyms: 同义词表(防漏召回:用户措辞与条目名不一致时也能命中,审核手册小项 #5)
 deliverables:
   - id: raw_multiqc_r1
     name: "原始数据 R1 MultiQC 汇总报告"
@@ -6,12 +7,14 @@ deliverables:
     targets:
       - "01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html"
     keywords: ["质控", "QC", "fastqc", "multiqc", "原始数据", "R1", "质量评估"]
+    synonyms: ["质检", "read1", "一端", "质量报告", "quality control"]
   - id: raw_multiqc_r2
     name: "原始数据 R2 MultiQC 汇总报告"
     description: "全部样本 R2 FastQC 聚合报告,评估原始数据质量"
     targets:
       - "01.qc/short_read_r2_multiqc/multiqc_r2_raw-data_report.html"
     keywords: ["质控", "QC", "fastqc", "multiqc", "原始数据", "R2", "质量评估"]
+    synonyms: ["质检", "read2", "二端", "质量报告", "quality control"]
   - id: raw_multiqc_all
     name: "原始数据双方向 MultiQC 全套质控报告"
     description: "R1+R2 两份 MultiQC 聚合报告,完整的原始数据质控交付"
@@ -19,3 +22,4 @@ deliverables:
       - "01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html"
       - "01.qc/short_read_r2_multiqc/multiqc_r2_raw-data_report.html"
     keywords: ["质控", "QC", "fastqc", "multiqc", "原始数据", "全套", "质检报告"]
+    synonyms: ["全套质检", "双端质控", "双方向", "完整质控", "质检汇总", "quality report"]

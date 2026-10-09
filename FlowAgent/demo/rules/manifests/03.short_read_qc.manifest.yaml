@@ -34,7 +34,12 @@ rules:
         kind: intermediate
     config_requires:
       - "convert_md5"
-      - "parameter.threads.fastqc"
+      - key: "parameter.threads.fastqc"
+        type: "integer"
+        minimum: 1
+        maximum: 64
+        default: 2
+        description: "FastQC 线程数"
     conda: "envs/fastqc.yaml"
     resources_tier: "low_resource"
 
@@ -63,7 +68,12 @@ rules:
         kind: intermediate
     config_requires:
       - "convert_md5"
-      - "parameter.threads.fastqc"
+      - key: "parameter.threads.fastqc"
+        type: "integer"
+        minimum: 1
+        maximum: 64
+        default: 2
+        description: "FastQC 线程数"
     conda: "envs/fastqc.yaml"
     resources_tier: "low_resource"
 
@@ -83,7 +93,12 @@ rules:
         pattern: "01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html"
         kind: report
     config_requires:
-      - "parameter.threads.multiqc"
+      - key: "parameter.threads.multiqc"
+        type: "integer"
+        minimum: 1
+        maximum: 32
+        default: 2
+        description: "MultiQC 线程数"
     conda: "envs/multiqc.yaml"
     resources_tier: "low_resource"
 
@@ -103,6 +118,11 @@ rules:
         pattern: "01.qc/short_read_r2_multiqc/multiqc_r2_raw-data_report.html"
         kind: report
     config_requires:
-      - "parameter.threads.multiqc"
+      - key: "parameter.threads.multiqc"
+        type: "integer"
+        minimum: 1
+        maximum: 32
+        default: 2
+        description: "MultiQC 线程数"
     conda: "envs/multiqc.yaml"
     resources_tier: "low_resource"

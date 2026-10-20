@@ -13,13 +13,17 @@ const cfg = {
   baseURL: '', apiKey: '', model: '', modelExpert: '',
   workflowRoot: root, host: '127.0.0.1', port: 0, authToken: '',
   allowedOrigins: [], allowSubmit: false, cores: 1, useConda: false,
-  condaFrontend: 'mamba', extraArgs: [],
+  condaFrontend: 'mamba', extraArgs: [], executor: 'local' as const, slurmPartition: '',
 } satisfies FlowAgentConfig;
 
 const { validate_manifests } = createValidateTool(cfg, 'expert');
-const result = await validate_manifests.execute!(
+const result: unknown = await validate_manifests.execute!(
   { task_id: `onboard-validate-${Date.now()}`, lint },
   { toolCallId: 'manual', messages: [], abortSignal: undefined as never },
 );
+if (result !== null && typeof result === 'object' && Symbol.asyncIterator in result) {
+  console.error('validate_manifests 返回了流式输出(非预期),无法汇总校验结果');
+  process.exit(2);
+}
 console.log(JSON.stringify(result, null, 2));
-process.exit(result.ok ? 0 : 1);
+process.exit((result as { ok?: boolean }).ok ? 0 : 1);

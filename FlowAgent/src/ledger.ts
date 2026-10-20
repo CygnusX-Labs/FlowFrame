@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AgentMode } from './config';
 
-export type LedgerOp = 'dry_run' | 'summary' | 'validate' | 'submit' | 'error' | 'fix' | 'human_decision';
+export type LedgerOp = 'dry_run' | 'summary' | 'validate' | 'submit' | 'error' | 'fix' | 'human_decision' | 'plan';
 
 export interface LedgerEntry {
   /** 事件唯一 ID(规范 §4.6:事件需可标识、可关联) */
@@ -28,6 +28,10 @@ export interface LedgerEntry {
   bundle?: string;
   /** 确认事件标识(confirm_submit 工具调用的 toolCallId),HTTP 前端应答去重用 */
   confirm_id?: string;
+  /** 执行对象摘要(架构评审 §4.2):dry_run/人工确认/submit 三方绑定,防「确认 A 执行 B」 */
+  spec_digest?: string;
+  /** 本次提交的运行 ID(runs/<task_id>/<run_id> 目录名,同任务多次提交互不覆盖) */
+  run_id?: string;
 }
 
 export function ledgerPath(root: string): string {
@@ -121,6 +125,45 @@ export function hasConfirmRecord(root: string, confirmId: string): boolean {
 }
 
 /**
+ * 执行对象摘要绑定(架构评审 §4.2):本任务 dry_run 成功记录所绑定的摘要集合。
+ * 只认带 spec_digest 的记录——dry-run 之后改动过组合/config/样本表/rule 库,
+ * 旧记录即不再匹配,须重新 dry_run。
+ */
+export function successfulDryRunDigests(
+  root: string,
+  taskId: string,
+  targets: string[],
+  workdir = '.',
+): Set<string> {
+  return new Set(
+    readLedger(root)
+      .filter(
+        (e) =>
+          e.op === 'dry_run' &&
+          e.result === 'success' &&
+          e.spec_digest &&
+          taskMatches(e, taskId, targets, workdir),
+      )
+      .map((e) => e.spec_digest!),
+  );
+}
+
+/** 本任务人工确认记录(approved)所绑定的摘要集合,语义同上 */
+export function approvedDigests(root: string, taskId: string, targets: string[], workdir = '.'): Set<string> {
+  return new Set(
+    readLedger(root)
+      .filter(
+        (e) =>
+          e.op === 'human_decision' &&
+          e.result === 'approved' &&
+          e.spec_digest &&
+          taskMatches(e, taskId, targets, workdir),
+      )
+      .map((e) => e.spec_digest!),
+  );
+}
+
+/**
  * 熔断计数:本任务同一归一化签名此前的 dry_run 失败次数。
  * 签名由 classifyError 归一化(异常类型 + rule 名 + 去路径/数字/引号的消息骨架),
  * 保证"路径不同的同类 MissingInput"计入同一签名(审核手册问题 4)。
@@ -129,4 +172,29 @@ export function countSignatureFailures(root: string, taskId: string, signature: 
   return readLedger(root).filter(
     (e) => e.op === 'dry_run' && e.task_id === taskId && e.result === 'failed' && e.signature === signature,
   ).length;
+}
+
+/**
+ * 熔断前置阻断依据(架构评审 §4.4):本调用(task_id+targets+workdir 完全一致)最近一次
+ * retryable/unknown 桶失败,及其签名累计次数。签名在执行前不可知,无法预判本次会不会
+ * 命中同签名;但同一调用的 snakemake 报错是确定的——上次失败签名已计 2 次时,再实际执行
+ * 第 3 次必然熔断,故在执行前直接拒绝。解除:计划变更(新 task_id 重新 dry-run)或人工清除台账。
+ */
+export function lastCountedFailure(
+  root: string,
+  taskId: string,
+  targets: string[],
+  workdir = '.',
+): { signature: string; bucket: string; count: number } | null {
+  const failures = readLedger(root).filter(
+    (e) =>
+      e.op === 'dry_run' &&
+      e.result === 'failed' &&
+      (e.bucket === 'retryable' || e.bucket === 'unknown') &&
+      e.signature &&
+      taskMatches(e, taskId, targets, workdir),
+  );
+  const last = failures[failures.length - 1];
+  if (!last) return null;
+  return { signature: last.signature!, bucket: last.bucket!, count: countSignatureFailures(root, taskId, last.signature!) };
 }

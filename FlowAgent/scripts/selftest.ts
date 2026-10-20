@@ -8,6 +8,7 @@ import path from 'node:path';
 import { loadConfig, PACKAGE_ROOT } from '../src/config';
 import { createTools } from '../src/tools';
 import { appendLedger } from '../src/ledger';
+import { computeExecutionSpecDigestSync } from '../src/spec-digest';
 
 type ToolMap = ReturnType<typeof createTools>;
 
@@ -46,7 +47,9 @@ async function main() {
   fs.cpSync(srcDemo, tmp, { recursive: true, filter: (src) => !skip.test(src) });
   console.log(`selftest root: ${tmp}\n`);
 
-  const cfg = { ...loadConfig(), workflowRoot: tmp };
+  // 自测必须确定性:显式关闭提交开关(否则开发者 .env 若设 FLOWAGENT_ALLOW_SUBMIT=true,
+  // 闸 3 不再拦截,两个"止步于服务端开关"用例会真的后台拉起 snakemake 并失败)
+  const cfg = { ...loadConfig(), workflowRoot: tmp, allowSubmit: false };
   const tools: ToolMap = createTools(cfg);
   const task = 'selftest';
   const target = '01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html';
@@ -88,6 +91,30 @@ async function main() {
     return r.ok === true;
   });
 
+  await check('bootstrap 契约:样本表缺失→validate_manifests 以 issue 检出(评审 §7.4)', async () => {
+    const samplesFile = path.join(tmp, 'config', 'samples.csv');
+    const backup = fs.readFileSync(samplesFile);
+    fs.rmSync(samplesFile);
+    try {
+      const r = await exec(tools.validate_manifests, { task_id: task });
+      return r.ok === false && r.issues.join('\n').includes('samples.csv');
+    } finally {
+      fs.writeFileSync(samplesFile, backup); // 还原:后续 dry_run 依赖样本表
+    }
+  });
+
+  await check('bootstrap 契约:conda 环境缺失→validate_manifests 以 issue 检出', async () => {
+    const envFile = path.join(tmp, 'envs', 'fastqc.yaml');
+    const backup = fs.readFileSync(envFile);
+    fs.rmSync(envFile);
+    try {
+      const r = await exec(tools.validate_manifests, { task_id: task });
+      return r.ok === false && r.issues.join('\n').includes('conda 环境不存在');
+    } finally {
+      fs.writeFileSync(envFile, backup);
+    }
+  });
+
   await check('confirm_submit 为客户端工具(无 execute,由人应答)', async () => {
     return typeof (tools.confirm_submit as any).execute !== 'function';
   });
@@ -125,7 +152,7 @@ async function main() {
   });
 
   await check('人工确认落账后→仅剩服务端开关拒绝(闸3)', async () => {
-    // 模拟 CLI humanConfirm 应答 confirm_submit 后写入的台账记录
+    // 模拟 CLI humanConfirm 应答 confirm_submit 后写入的台账记录(含执行对象摘要绑定)
     appendLedger(tmp, {
       ts: new Date().toISOString(),
       task_id: task,
@@ -134,6 +161,7 @@ async function main() {
       object: '.',
       result: 'approved',
       detail: 'CLI 终端人工确认 by=cli-user(自测模拟)',
+      spec_digest: computeExecutionSpecDigestSync(tmp, '.', [target], task),
     });
     const r = await exec(tools.submit_cluster, {
       task_id: task,
@@ -179,7 +207,7 @@ async function main() {
       console.log('  dry_run:', d.output_tail);
       return false;
     }
-    // 闸 2:写入一次确认,再模拟一次已启动的提交(消耗掉)
+    // 闸 2:写入一次确认(绑定执行对象摘要),再模拟一次已启动的提交(消耗掉)
     appendLedger(tmp, {
       ts: new Date().toISOString(),
       task_id: t,
@@ -188,6 +216,7 @@ async function main() {
       object: '.',
       result: 'approved',
       detail: 'CLI 终端人工确认 by=cli-user(自测模拟)',
+      spec_digest: computeExecutionSpecDigestSync(tmp, '.', [target], t),
     });
     appendLedger(tmp, {
       ts: new Date().toISOString(),
@@ -200,6 +229,35 @@ async function main() {
     });
     const r = await exec(tools.submit_cluster, { task_id: t, targets: [target], reason: '消费语义用例' });
     return r.ok === false && r.refused === true && r.reason.includes('已被消费');
+  });
+
+  await check('审批绑定执行对象摘要:dry-run+确认后改动 config→submit 被拒(评审 §4.2)', async () => {
+    const t = 'selftest_digest_bind';
+    const d = await exec(tools.dry_run, { task_id: t, targets: [target] });
+    if (!d.ok) {
+      console.log('  dry_run:', d.output_tail);
+      return false;
+    }
+    appendLedger(tmp, {
+      ts: new Date().toISOString(),
+      task_id: t,
+      op: 'human_decision',
+      target: target,
+      object: '.',
+      result: 'approved',
+      detail: 'CLI 终端人工确认 by=cli-user(自测模拟)',
+      spec_digest: computeExecutionSpecDigestSync(tmp, '.', [target], t),
+    });
+    // 模拟「确认后改动有效配置」:旧 dry-run 与旧确认不应再放行
+    const cfgFile = path.join(tmp, 'config', 'config.yaml');
+    const original = fs.readFileSync(cfgFile, 'utf8');
+    fs.appendFileSync(cfgFile, '# drift:模拟确认后的配置变动\n');
+    try {
+      const r = await exec(tools.submit_cluster, { task_id: t, targets: [target], reason: '摘要绑定对抗用例' });
+      return r.ok === false && r.refused === true && r.reason.includes('摘要');
+    } finally {
+      fs.writeFileSync(cfgFile, original); // 还原,避免影响后续用例的摘要
+    }
   });
 
   const composedSnakefile = [
@@ -592,7 +650,7 @@ async function main() {
 
   // ---- 阶段 1:熔断签名归一化 + 分桶(审核手册问题 4 / 原评审 #6) ----
 
-  await check('熔断:同一签名(retryable 桶)第 3 次 dry_run 被拒', async () => {
+  await check('熔断:同一签名(retryable 桶)第 3 次 dry_run 被前置阻断(不再实际执行,评审 §4.4)', async () => {
     const breakerSnakefile = [
       'configfile: "../../config/config.yaml"',
       '',
@@ -630,7 +688,7 @@ async function main() {
       r1.signature === r2.signature && // 路径/数字不同也应归一为同一签名
       r2.failure_count === 2 &&
       r3.refused === true &&
-      r3.breaker === 'tripped' &&
+      (r3.breaker === 'armed' || r3.breaker === 'tripped') && // armed=执行前阻断,tripped=兜底
       r3.reason.includes('熔断')
     );
   });
@@ -706,23 +764,412 @@ async function main() {
     return r.ok === false && r.issues.some((i: string) => i.includes('缺少 pattern'));
   });
 
-  await check('run bundle:版本固化 + 副本落盘(非 git → manifest hash)', async () => {
+  await check('选中 rule 必需字段:缺失→write_composed 拒绝 + validate_manifests 检出(评审:校验有效合并配置)', async () => {
+    // 造一个库内本来就没有的必需 key 的临时 rule(纯 schema,不占端口)
+    const smkRel = 'rules/98.selftest_req.smk';
+    const mfRel = 'rules/manifests/98.selftest_req.manifest.yaml';
+    fs.writeFileSync(path.join(tmp, smkRel), 'rule req_rule:\n    output: touch("98.selftest_req.done")\n    shell: "true"\n');
+    fs.writeFileSync(
+      path.join(tmp, mfRel),
+      [
+        'module:',
+        '  id: "98.selftest_req"',
+        '  snakefile: "rules/98.selftest_req.smk"',
+        'rules:',
+        '  - name: req_rule',
+        '    summary: "selftest 必需字段用例"',
+        '    config_requires:',
+        '      - key: "selftest_only.required_key"',
+        '        type: "string"',
+        '',
+      ].join('\n'),
+    );
+    const reqSnakefile = [
+      'configfile: "../../config/config.yaml"',
+      '',
+      'module req:',
+      '    snakefile: "../../rules/98.selftest_req.smk"',
+      '    config: config',
+      '',
+      'use rule req_rule from req as req_req_rule',
+      '',
+      'rule all:',
+      '    input: "98.selftest_req.done"',
+      '',
+    ].join('\n');
+    // ① 选中 rule 的必需 key 缺失:write_composed 拒绝(校验对象是 仓库config+副本 的合并结果)
+    const bad = await exec(tools.write_composed, {
+      task_id: task,
+      name: 'selftest_req_missing',
+      snakefile: reqSnakefile,
+      config_yaml: 'convert_md5: link_dir\n',
+      reason: '选中 rule 必需字段缺失对抗用例',
+    });
+    const refused = bad.ok === false && bad.error.includes('selftest_only.required_key');
+    // ② 补上必需 key:放行
+    const good = await exec(tools.write_composed, {
+      task_id: task,
+      name: 'selftest_req_ok',
+      snakefile: reqSnakefile,
+      config_yaml: ['selftest_only:', '  required_key: "x"', ''].join('\n'),
+      reason: '选中 rule 必需字段补齐用例',
+    });
+    let detected = false;
+    if (refused && good.ok) {
+      // ③ 写入后副本被改坏(删掉必需 key):validate_manifests 以 error 检出
+      const dir = good.dir as string;
+      fs.writeFileSync(path.join(tmp, dir, 'config.yaml'), 'convert_md5: link_dir\n');
+      const v = await exec(tools.validate_manifests, { task_id: task, workdir: dir });
+      detected = v.ok === false && v.issues.join('\n').includes('selftest_only.required_key');
+    }
+    // 清理临时 rule,避免影响后续用例
+    fs.rmSync(path.join(tmp, smkRel));
+    fs.rmSync(path.join(tmp, mfRel));
+    return refused && good.ok && detected;
+  });
+
+  await check('选中子图闭合:只选 multiqc(缺 fastqc 生产者)→validate_manifests 以 error 检出(评审 §7.3)', async () => {
+    // 与熔断用例同一手法:只引 multiqc(缺 fastqc 生产者),制造不闭合子图
+    const openSnakefile = [
+      'configfile: "../../config/config.yaml"',
+      '',
+      'module qc:',
+      '    snakefile: "../../rules/03.short_read_qc.smk"',
+      '    config: config',
+      '',
+      'use rule short_read_multiqc_r1 from qc as qc_short_read_multiqc_r1',
+      '',
+      'rule all:',
+      `    input: "${target}"`,
+      '',
+    ].join('\n');
+    const w = await exec(tools.write_composed, {
+      task_id: task,
+      name: 'selftest_open_graph',
+      snakefile: openSnakefile,
+      reason: '选中子图不闭合对抗用例:只选聚合 rule,缺生产者',
+    });
+    if (!w.ok) {
+      console.log('  write_composed:', w.error);
+      return false;
+    }
+    const v = await exec(tools.validate_manifests, { task_id: task, workdir: w.dir });
+    const bad = v.ok === false && v.issues.join('\n').includes('选中子图不闭合') && v.issues.join('\n').includes('qc.fastqc.zip');
+    // 对照:完整组合(md5 全模块 + qc_r1 + multiqc_r1)闭合,不得误报
+    const fullDir = fs
+      .readdirSync(path.join(tmp, 'composed'))
+      .find((d) => d.endsWith('_selftest_qc_only'));
+    if (!fullDir) return false;
+    const full = await exec(tools.validate_manifests, { task_id: task, workdir: `composed/${fullDir}` });
+    return bad && full.ok === true;
+  });
+
+  await check('PipelinePlan 编译器:结构化计划→模板 Snakefile→dry_run 端到端通过(评审 §7.3)', async () => {
+    const r = await exec(tools.compile_pipeline, {
+      task_id: 'selftest_compiled',
+      name: 'selftest_compiled',
+      modules: [
+        { alias: 'md5', snakefile: 'rules/02.file_convert_md5.smk' },
+        { alias: 'qc', snakefile: 'rules/03.short_read_qc.smk' },
+      ],
+      uses: [
+        { rule: 'seq_preprocessor', from: 'md5', as: 'md5_seq_preprocessor' },
+        { rule: 'check_md5', from: 'md5', as: 'md5_check_md5' },
+        { rule: 'short_read_qc_r1', from: 'qc', as: 'qc_short_read_qc_r1' },
+        { rule: 'short_read_multiqc_r1', from: 'qc', as: 'qc_short_read_multiqc_r1' },
+      ],
+      targets: [target],
+      reason: 'PipelinePlan 编译器用例:与手写组合等价的最小质控计划',
+    });
+    if (!r.ok) {
+      console.log('  compile:', r.error);
+      return false;
+    }
+    const d = await exec(tools.dry_run, { task_id: 'selftest_compiled', targets: [target], workdir: r.dir });
+    return d.ok === true;
+  });
+
+  await check('PipelinePlan 编译器:use_all 整模块引入(md5_* + 显式 qc)→ 编译 + dry_run 通过', async () => {
+    const r = await exec(tools.compile_pipeline, {
+      task_id: 'selftest_compiled_all',
+      name: 'selftest_compiled_all',
+      modules: [
+        { alias: 'md5', snakefile: 'rules/02.file_convert_md5.smk' },
+        { alias: 'qc', snakefile: 'rules/03.short_read_qc.smk' },
+      ],
+      uses: [
+        { rule: 'short_read_qc_r1', from: 'qc', as: 'qc_short_read_qc_r1' },
+        { rule: 'short_read_multiqc_r1', from: 'qc', as: 'qc_short_read_multiqc_r1' },
+      ],
+      use_all: [{ from: 'md5', prefix: 'md5' }],
+      targets: [target],
+      reason: 'use_all 用例:与 demo 手写组合同构(整模块 md5 + 显式 qc)',
+    });
+    if (!r.ok) {
+      console.log('  compile:', r.error);
+      return false;
+    }
+    const d = await exec(tools.dry_run, { task_id: 'selftest_compiled_all', targets: [target], workdir: r.dir });
+    return d.ok === true;
+  });
+
+  await check('PipelinePlan 编译器:不闭合计划/幽灵 module/坏标识符→拒绝', async () => {
+    const open = await exec(tools.compile_pipeline, {
+      task_id: task,
+      name: 'selftest_compiled_open',
+      modules: [{ alias: 'qc', snakefile: 'rules/03.short_read_qc.smk' }],
+      uses: [{ rule: 'short_read_multiqc_r1', from: 'qc', as: 'qc_multiqc' }],
+      targets: [target],
+      reason: '不闭合计划用例',
+    });
+    const ghostMod = await exec(tools.compile_pipeline, {
+      task_id: task,
+      name: 'selftest_compiled_ghost',
+      modules: [{ alias: 'x', snakefile: 'rules/nonexistent.smk' }],
+      uses: [{ rule: 'seq_preprocessor', from: 'x', as: 'x_seq' }],
+      targets: [target],
+      reason: '幽灵 module 用例',
+    });
+    const badIdent = await exec(tools.compile_pipeline, {
+      task_id: task,
+      name: 'selftest_compiled_bad',
+      modules: [{ alias: 'bad-ident', snakefile: 'rules/03.short_read_qc.smk' }],
+      uses: [{ rule: 'short_read_qc_r1', from: 'bad-ident', as: 'x' }],
+      targets: [target],
+      reason: '坏标识符用例',
+    });
+    return (
+      open.ok === false &&
+      String(open.error).includes('不闭合') &&
+      ghostMod.ok === false &&
+      String(ghostMod.error).includes('不存在') &&
+      badIdent.ok === false
+    );
+  });
+
+  await check('AnalysisPlan:写方案→纳入摘要;重复写/幽灵 rule 被拒(评审:科学方案成明确审阅对象)', async () => {
+    const t = 'selftest_plan';
+    const digestBefore = computeExecutionSpecDigestSync(tmp, '.', [target], t);
+    const good = await exec(tools.write_analysis_plan, {
+      task_id: t,
+      scientific_goal: '比较 case 与 ctrl 的测序质量',
+      grouping: 'case(S1) vs ctrl(S2),取自 config/samples.csv 的 group 列',
+      method_assumptions: 'fastqc+multiqc 通用质控,不检验生物学差异',
+      deliverable: 'raw_multiqc_r1',
+      rules: ['short_read_qc_r1', 'short_read_multiqc_r1'],
+      reason: 'catalog 命中 deliverable 的质控方案',
+    });
+    const digestAfter = computeExecutionSpecDigestSync(tmp, '.', [target], t);
+    const dup = await exec(tools.write_analysis_plan, {
+      task_id: t,
+      scientific_goal: '改写方案',
+      grouping: 'g',
+      method_assumptions: 'a',
+      deliverable: 'raw_multiqc_r1',
+      rules: ['short_read_qc_r1'],
+      reason: '重复写方案用例',
+    });
+    const ghost = await exec(tools.write_analysis_plan, {
+      task_id: 'selftest_plan_ghost',
+      scientific_goal: 'x',
+      grouping: 'g',
+      method_assumptions: 'a',
+      deliverable: 'd',
+      rules: ['no_such_rule'],
+      reason: '幽灵 rule 用例',
+    });
+    return (
+      good.ok === true &&
+      digestBefore !== digestAfter && // 方案文件纳入执行对象摘要
+      dup.ok === false &&
+      dup.refused === true &&
+      ghost.ok === false &&
+      ghost.error.includes('no_such_rule')
+    );
+  });
+
+  await check('HTTP 审批接口:服务端自算摘要绑定,未 dry-run 拒批/内容漂移拒批/confirm_id 一次性(评审 §4.1)', async () => {
+    const { createFlowAgentServer } = await import('../src/server');
+    const srv = createFlowAgentServer({ ...cfg, port: 0, authToken: '' });
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = (srv.address() as { port: number }).port;
+    const post = async (body: unknown) => {
+      const r = await fetch(`http://127.0.0.1:${port}/api/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: r.status, body: (await r.json()) as { ok?: boolean; error?: string; spec_digest?: string } };
+    };
+    try {
+      // ① 未 dry-run 过的任务 → 拒绝批准(不能批未检查的内容)
+      const noDry = await post({ task_id: 'http_approve_never', targets: [target], decision: 'approved' });
+      // ② 本任务已有 dry_run 成功记录(task=selftest,仓库根)→ 批准成功,摘要服务端自算
+      const ok1 = await post({ task_id: task, targets: [target], workdir: '.', confirm_id: 'http-confirm-1', decision: 'approved' });
+      // ③ 同一 confirm_id 再次批准 → 409 一次性消费
+      const dup = await post({ task_id: task, targets: [target], workdir: '.', confirm_id: 'http-confirm-1', decision: 'approved' });
+      // ④ 摘要不匹配(workdir 不一致)→ 400
+      const drift = await post({ task_id: task, targets: [target], workdir: 'composed/nope', decision: 'approved' });
+      // ⑤ 拒绝决议也落账(rejected,同样绑定摘要)
+      const rej = await post({ task_id: task, targets: [target], workdir: '.', confirm_id: 'http-confirm-2', decision: 'rejected' });
+      return (
+        noDry.status === 400 &&
+        ok1.status === 200 &&
+        ok1.body.ok === true &&
+        typeof ok1.body.spec_digest === 'string' &&
+        dup.status === 409 &&
+        drift.status === 400 &&
+        rej.status === 200
+      );
+    } finally {
+      srv.close();
+    }
+  });
+
+  await check('HTTP 审批接口:内容漂移后拒批(dry-run 后改动 config,摘要不一致→409)', async () => {
+    const { createFlowAgentServer } = await import('../src/server');
+    const srv = createFlowAgentServer({ ...cfg, port: 0, authToken: '' });
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = (srv.address() as { port: number }).port;
+    const cfgFile = path.join(tmp, 'config', 'config.yaml');
+    const original = fs.readFileSync(cfgFile, 'utf8');
+    fs.appendFileSync(cfgFile, '# drift:http approve 用例\n');
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: task, targets: [target], decision: 'approved' }),
+      });
+      return r.status === 409; // 有 dry-run 记录但内容已漂移 → 摘要不一致拒批
+    } finally {
+      fs.writeFileSync(cfgFile, original);
+      srv.close();
+    }
+  });
+
+  await check('check_run:无提交记录→报错;模拟完成运行→succeeded+产物清单+状态文件+完成事件只落一次', async () => {
+    const none = await exec(tools.check_run, { task_id: 'never-submitted' });
+    // 伪造一次已完成提交:日志含退出码行;target 在副本中不存在(验证产物清单如实记录缺失)
+    const t2 = 'selftest_checkrun';
+    const missingTarget = '01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html';
+    const logRel = 'logs/flowagent/submit-selftest_checkrun-fake.log';
+    fs.mkdirSync(path.join(tmp, 'logs', 'flowagent'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, logRel), 'Building DAG of jobs...\n[flowagent] snakemake exited, code=0\n');
+    appendLedger(tmp, {
+      ts: new Date().toISOString(),
+      task_id: t2,
+      op: 'submit',
+      target: missingTarget,
+      object: '.',
+      result: 'started',
+      detail: `pid=${process.pid} log=${logRel} run_id=fake-run-1`,
+      run_id: 'fake-run-1',
+      reason: 'check_run 用例',
+    });
+    const r1 = await exec(tools.check_run, { task_id: t2 });
+    const r2 = await exec(tools.check_run, { task_id: t2 }); // 第二次查询走缓存,不重复落账
+    const ledgerText = fs.readFileSync(path.join(tmp, 'agent', 'run_ledger.jsonl'), 'utf8');
+    const finishedCount = ledgerText
+      .split('\n')
+      .filter((l) => l.includes('"run_id":"fake-run-1"') && l.includes('"result":"finished"')).length;
+    return (
+      none.ok === false &&
+      r1.ok === true &&
+      r1.status === 'succeeded' &&
+      r1.exit_code === 0 &&
+      r1.outputs[0].present === false &&
+      fs.existsSync(path.join(tmp, 'runs', t2, 'fake-run-1', 'run_state.json')) &&
+      fs.existsSync(path.join(tmp, 'runs', t2, 'fake-run-1', 'post_run_manifest.json')) &&
+      finishedCount === 1 &&
+      r2.status === 'succeeded'
+    );
+  });
+
+  await check('executor 接口:local 可后台提交;slurm 环境自检失败即抛错(评审 §7.6)', async () => {
+    const { createExecutor } = await import('../src/executor');
+    const local = createExecutor({ ...cfg, executor: 'local' });
+    if (local.kind !== 'local') return false;
+    // local 真实后台提交一个立即结束的脚本,验证接口可用
+    const logRel = 'logs/flowagent/executor-selftest.log';
+    fs.mkdirSync(path.dirname(path.join(tmp, logRel)), { recursive: true });
+    const pid = local.spawn({
+      cwd: tmp,
+      logFile: path.join(tmp, logRel),
+      script: 'echo ok >> logs/flowagent/executor-selftest.log',
+      cores: 1,
+      taskId: 'executor_selftest',
+    });
+    if (!(pid > 0)) return false;
+    // 本机无 sbatch(自测前置条件),slurm 构造必须明确抛错而不是静默退回 local
+    let threw = false;
+    try {
+      createExecutor({ ...cfg, executor: 'slurm' });
+    } catch (e) {
+      threw = String(e).includes('sbatch');
+    }
+    return threw;
+  });
+
+  await check('GET /api/runs:服务端任务状态视图(聚合 run_state,不依赖客户端历史)', async () => {
+    const { createFlowAgentServer } = await import('../src/server');
+    const srv = createFlowAgentServer({ ...cfg, port: 0, authToken: '' });
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = (srv.address() as { port: number }).port;
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/runs`);
+      const body = (await r.json()) as { ok?: boolean; runs?: { task_id: string; run_id: string; state: { status?: string } }[] };
+      // 前序 check_run 用例固化的 run_state 必须出现在服务端视图里
+      const hit = body.runs?.find((x) => x.run_id === 'fake-run-1');
+      return r.status === 200 && body.ok === true && hit !== undefined && hit.state.status === 'succeeded';
+    } finally {
+      srv.close();
+    }
+  });
+
+  await check('check_run:无退出码行且进程存活→running', async () => {
+    const t3 = 'selftest_checkrun_running';
+    const logRel = 'logs/flowagent/submit-selftest_checkrun_running.log';
+    fs.writeFileSync(path.join(tmp, logRel), 'Building DAG of jobs...\n');
+    appendLedger(tmp, {
+      ts: new Date().toISOString(),
+      task_id: t3,
+      op: 'submit',
+      target: '98.selftest_req.done',
+      object: '.',
+      result: 'started',
+      detail: `pid=${process.pid} log=${logRel} run_id=fake-run-2`,
+      run_id: 'fake-run-2',
+      reason: 'check_run running 用例',
+    });
+    const r = await exec(tools.check_run, { task_id: t3 });
+    return r.ok === true && r.status === 'running';
+  });
+
+
+  await check('run bundle:版本固化 + 副本落盘(非 git → manifest hash)+ run_id 唯一不覆盖', async () => {
     const { createRunBundle } = await import('../src/run-bundle');
     // 组合目录前缀是当天日期,不能硬编码——按后缀定位实际目录,否则过了当天必失败
     const composedDir = fs
       .readdirSync(path.join(tmp, 'composed'))
       .find((d) => d.endsWith('_selftest_qc_only'));
     if (!composedDir) return false;
-    const rel = await createRunBundle(tmp, task, `composed/${composedDir}`);
-    if (!rel) return false;
-    const versionFile = path.join(tmp, rel, 'rule_library_version.txt');
+    const b1 = createRunBundle(tmp, task, `composed/${composedDir}`, [target]);
+    const b2 = createRunBundle(tmp, task, `composed/${composedDir}`, [target]);
+    const versionFile = path.join(tmp, b1.rel, 'rule_library_version.txt');
     const okFiles =
       fs.existsSync(versionFile) &&
-      fs.existsSync(path.join(tmp, rel, 'bundle_manifest.json')) &&
-      fs.existsSync(path.join(tmp, rel, 'config', 'config.yaml')) &&
-      fs.existsSync(path.join(tmp, rel, 'composed', 'Snakefile'));
+      fs.existsSync(path.join(tmp, b1.rel, 'bundle_manifest.json')) &&
+      fs.existsSync(path.join(tmp, b1.rel, 'config', 'config.yaml')) &&
+      fs.existsSync(path.join(tmp, b1.rel, 'composed', 'Snakefile'));
     const version = fs.readFileSync(versionFile, 'utf8').trim();
-    return okFiles && /^(git:|manifests-sha256:)/.test(version) && !version.startsWith('git:');
+    // 同 task_id 两次固化:run_id 不同、目录各自独立(架构评审 §4.3:不再互相覆盖)
+    const distinct = b1.run_id !== b2.run_id && fs.existsSync(path.join(tmp, b2.rel));
+    return (
+      okFiles &&
+      distinct &&
+      /^(git:|manifests-sha256:)/.test(version) &&
+      !version.startsWith('git:')
+    );
   });
 
   await check('台账已记录 dry_run 成功、human_decision、reason 与报错签名', async () => {

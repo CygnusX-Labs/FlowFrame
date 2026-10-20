@@ -49,6 +49,13 @@ export interface FlowAgentConfig {
   condaFrontend: string;
   /** submit 追加参数,如 "--logger rich-loguru"(真实 Flow 仓库的强制 logger 插件) */
   extraArgs: string[];
+  /**
+   * 执行器(架构评审 §7.6 executor 接口):local=本地后台 Snakemake(默认);
+   * slurm=sbatch 提交到集群(需 sbatch 在 PATH,日志/退出码行仍写同一 logFile,check_run 可查)。
+   */
+  executor: 'local' | 'slurm';
+  /** Slurm 分区名(executor=slurm 时可选,空则走集群默认分区) */
+  slurmPartition: string;
 }
 
 /** 会话模式:standard=员工(按需执行);expert=专家(主动体检/提案起草/扩展修复策略) */
@@ -76,6 +83,8 @@ export function loadConfig(): FlowAgentConfig {
     useConda: process.env.FLOWAGENT_USE_CONDA !== 'false',
     condaFrontend: process.env.FLOWAGENT_CONDA_FRONTEND ?? 'conda',
     extraArgs: (process.env.FLOWAGENT_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean),
+    executor: process.env.FLOWAGENT_EXECUTOR === 'slurm' ? 'slurm' : 'local',
+    slurmPartition: process.env.FLOWAGENT_SLURM_PARTITION ?? '',
   };
 }
 
@@ -86,4 +95,20 @@ export function safeJoin(root: string, rel: string): string {
     throw new Error(`路径越界: ${rel} 解析到仓库根之外,已拒绝`);
   }
   return resolved;
+}
+
+/**
+ * safeJoin + realpath 二次校验:已存在路径按真实文件身份再判一次,防 symlink 逃逸
+ * (safeJoin 只是词法判断,logs/ 下的软链可以指向仓库外)。不存在的路径(如 staged
+ * 组合目录)退回 safeJoin 的词法结果,与 composed-guard 的 staged 处理保持一致。
+ */
+export function safeJoinResolved(root: string, rel: string): string {
+  const abs = safeJoin(root, rel);
+  if (!fs.existsSync(abs)) return abs;
+  const realRoot = fs.realpathSync(root);
+  const real = fs.realpathSync(abs);
+  if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+    throw new Error(`路径越界(符号链接): ${rel} 真实位置在仓库根之外,已拒绝`);
+  }
+  return abs;
 }

@@ -3,6 +3,7 @@ import type { ModelMessage, ToolCallPart, ToolResultPart } from 'ai';
 import { loadConfig, type AgentMode } from './config';
 import { runFlowAgent } from './agent';
 import { appendLedger } from './ledger';
+import { computeExecutionSpecDigestSync } from './spec-digest';
 
 function preview(value: unknown, max = 600): string {
   const s = typeof value === 'string' ? value : JSON.stringify(value);
@@ -68,14 +69,19 @@ async function main() {
     if (input.summary) console.log(`  规模摘要: ${input.summary}`);
     const ans = (await nextLine('\x1b[33m确认提交? [y/N]\x1b[0m ')).trim().toLowerCase();
     const approved = ans === 'y' || ans === 'yes';
+    const workdir = input.workdir ?? '.';
+    // 确认即绑定当前执行对象摘要(架构评审 §4.2):确认后改动组合/config/样本表/rule 库,
+    // 本次批准的 digest 不再匹配,submit 会要求重新确认,防「确认 A,执行 B」。
+    const specDigest = computeExecutionSpecDigestSync(cfg.workflowRoot, workdir, input.targets ?? [], input.task_id);
     appendLedger(cfg.workflowRoot, {
       ts: new Date().toISOString(),
       task_id: input.task_id,
       op: 'human_decision',
       target: (input.targets ?? []).join(' '),
-      object: input.workdir ?? '.',
+      object: workdir,
       result: approved ? 'approved' : 'rejected',
       detail: `CLI 终端人工确认 by=cli-user`,
+      spec_digest: specDigest,
       mode,
     });
     return approved;

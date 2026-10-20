@@ -7,6 +7,8 @@
  *
  * 用法:npm run eval(需 FLOWAGENT_API_KEY;逐条完整循环,耗时与模型速度相关)
  *      npm run eval -- --mode expert|both(专家模式/双基线,区分模型换档与 prompt 退化)
+ *      npm run eval -- --save-baseline [--mode both]   保存逐用例判定基线(eval/eval-baseline.json)
+ * 常规运行自动与基线逐用例比对,报告退化(catalog 误判为缺口等评级下降)与改善。
  * 接入节奏:rule 库新增 rule、改 system prompt、改端口签名结构、切换专家模型时各跑一遍。
  */
 import fs from 'node:fs';
@@ -138,22 +140,28 @@ async function main() {
 
   const doc = YAML.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'eval', 'cases.yaml'), 'utf8')) as { cases: CaseDef[] };
   const cases = doc.cases;
+  const saveBaseline = process.argv.includes('--save-baseline');
   console.log(
-    `评测集:${cases.length} 条  模式:${modes.join('+')}  模型:standard=${cfg.model} expert=${cfg.modelExpert || cfg.model}\n`,
+    `评测集:${cases.length} 条  模式:${modes.join('+')}  模型:standard=${cfg.model} expert=${cfg.modelExpert || cfg.model}${saveBaseline ? '  (保存基线)' : ''}\n`,
   );
 
   const countsByMode = new Map<AgentMode, Record<Verdict, number>>();
+  const verdictsByMode = new Map<AgentMode, Record<string, Verdict>>();
   for (const mode of modes) {
     const counts: Record<Verdict, number> = { exact_match: 0, chain_partial: 0, chain_wrong: 0, mis_gap: 0 };
+    const verdicts: Record<string, Verdict> = {};
     countsByMode.set(mode, counts);
+    verdictsByMode.set(mode, verdicts);
     for (const c of cases) {
       process.stdout.write(`[${c.id}][${mode}] `);
       try {
         const { verdict, detail } = await runCase(cfg, c, mode);
         counts[verdict]++;
+        verdicts[c.id] = verdict;
         console.log(`${verdictLabel(verdict)}  ${detail}`);
       } catch (e) {
         counts.chain_wrong++;
+        verdicts[c.id] = 'chain_wrong';
         console.log(`执行异常: ${String(e).slice(0, 200)}`);
       }
     }
@@ -167,6 +175,51 @@ async function main() {
 链对但缺 rule ${counts.chain_partial}/${total}
 链错          ${counts.chain_wrong}/${total}
 误判断链      ${counts.mis_gap}/${total}`);
+  }
+
+  // 基线(评审 §7.7:standard/expert 分别建基线):--save-baseline 落盘;否则与既有基线逐用例比对
+  const baselinePath = path.join(PACKAGE_ROOT, 'eval', 'eval-baseline.json');
+  const rank: Record<Verdict, number> = { exact_match: 3, chain_partial: 2, chain_wrong: 1, mis_gap: 0 };
+  if (saveBaseline) {
+    const modesRecord: Record<string, Record<string, Verdict>> = {};
+    for (const mode of modes) modesRecord[mode] = verdictsByMode.get(mode)!;
+    const baseline = fs.existsSync(baselinePath)
+      ? (JSON.parse(fs.readFileSync(baselinePath, 'utf8')) as { modes: Record<string, Record<string, Verdict>> })
+      : { modes: {} };
+    for (const mode of modes) baseline.modes[mode] = verdictsByMode.get(mode)!;
+    fs.writeFileSync(
+      baselinePath,
+      JSON.stringify(
+        {
+          saved_at: new Date().toISOString(),
+          models: { standard: cfg.model, expert: cfg.modelExpert || cfg.model },
+          cases: cases.length,
+          modes: baseline.modes,
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+    console.log(`\n基线已保存: eval/eval-baseline.json(模式 ${modes.join(', ')})`);
+  } else if (fs.existsSync(baselinePath)) {
+    const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8')) as {
+      saved_at: string;
+      modes: Record<string, Record<string, Verdict>>;
+    };
+    console.log(`\n==== 基线比对(保存于 ${baseline.saved_at}) ====`);
+    for (const mode of modes) {
+      const prev = baseline.modes[mode];
+      if (!prev) {
+        console.log(`  [${mode}] 无基线(跑 --mode ${mode} --save-baseline 建立)`);
+        continue;
+      }
+      const cur = verdictsByMode.get(mode)!;
+      const regressions = cases.filter((c) => prev[c.id] && rank[cur[c.id] ?? 'chain_wrong'] < rank[prev[c.id]]);
+      const improved = cases.filter((c) => prev[c.id] && rank[cur[c.id] ?? 'chain_wrong'] > rank[prev[c.id]]);
+      console.log(`  [${mode}] 退化: ${regressions.length ? regressions.map((c) => `${c.id}(${prev[c.id]}→${cur[c.id]})`).join(', ') : '无'};改善: ${improved.length ? improved.map((c) => c.id).join(', ') : '无'}`);
+    }
+  } else {
+    console.log('\n(无基线;npm run eval -- --save-baseline [--mode both] 保存后可比对退化)');
   }
   console.log('提示:本基线用于检测退化(rule 库/prompt 改动前后对比),不要求一次跑满;--mode both 双基线可区分模型换档与 prompt 退化。');
 }

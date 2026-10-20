@@ -1,0 +1,15 @@
+{
+  "library": "git:d9080f61c138c5f66e5a951af0571e1071d0b35f",
+  "results": {
+    "reject_open_subgraph": "pass",
+    "reject_open_subgraph_use_all": "pass",
+    "reject_ghost_module": "pass",
+    "reject_ghost_rule_plan": "pass",
+    "reject_missing_required_config": "pass",
+    "reject_missing_samples": "pass",
+    "reject_missing_conda_env": "pass",
+    "accept_compiled_plan": "pass",
+    "accept_catalog_dryrun": "pass"
+  },
+  "saved_at": "2026-10-14T17:16:26.027Z"
+}

@@ -2,17 +2,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { tool } from 'ai';
 import { z } from 'zod';
-import { safeJoin, type AgentMode, type FlowAgentConfig } from '../config';
+import { safeJoin, safeJoinResolved, type AgentMode, type FlowAgentConfig } from '../config';
 import {
   appendLedger,
+  approvedDigests,
   countSignatureFailures,
-  hasApproval,
   hasSuccessfulDryRun,
   hasUnconsumedApproval,
+  lastCountedFailure,
+  readLedger,
+  successfulDryRunDigests,
 } from '../ledger';
 import { classifyError } from '../error-classify';
 import { createRunBundle } from '../run-bundle';
-import { runShell, spawnDetached, tail } from '../shell';
+import { computeExecutionSpecDigestSync } from '../spec-digest';
+import { createExecutor, slurmJobAlive, type FlowExecutor } from '../executor';
+import { runShell, tail } from '../shell';
 import { loadManifests } from './registry';
 
 const taskFields = {
@@ -31,7 +36,7 @@ const taskFields = {
  *   其顶层 Python 在 dry-run 阶段就会被执行,完全绕过 composed/ 三层防线);
  *   也不得含空白(台账按空格拼接/拆分 targets,空白会破坏硬约束的精确匹配)。
  */
-const TASK_ID_RE = /^[\w一-鿿][\w一-鿿.-]*$/;
+export const TASK_ID_RE = /^[\w一-鿿][\w一-鿿.-]*$/;
 
 function validateTaskArgs(task_id: string, targets: string[]): string | null {
   if (!TASK_ID_RE.test(task_id)) {
@@ -112,8 +117,10 @@ function tierRollup(root: string, dot: string): Record<string, number> | undefin
     for (const r of m.rules) tierOf.set(r.name, (r as any).resources_tier ?? 'unknown');
   const counts: Record<string, number> = {};
   for (const n of names) {
-    // 组合后的名字形如 qc_short_read_qc_r1(带命名空间前缀),取能匹配上的 manifest rule
-    const tier = tierOf.get(n) ?? [...tierOf.keys()].find((rn) => n.includes(rn)) ?? 'unknown';
+    // 组合后的名字形如 qc_short_read_qc_r1(带命名空间前缀),取能匹配上的 manifest rule;
+    // 命中的是 rule 名,还需回查 tierOf 拿到真正的资源档位(不能把 rule 名当档位)
+    const rn = tierOf.has(n) ? n : [...tierOf.keys()].find((k) => n.includes(k));
+    const tier = rn ? (tierOf.get(rn) ?? 'unknown') : 'unknown';
     counts[tier] = (counts[tier] ?? 0) + 1;
   }
   return counts;
@@ -140,7 +147,7 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
 
   const dry_run = tool({
     description:
-      '封装 snakemake -n:验证流程组合定义正确性,不真正执行。结果自动写入运行台账(失败时带归一化报错签名与分桶),是 submit_cluster 的前置硬约束(按 task_id + targets + workdir 匹配)。同一报错签名(retryable/unknown 桶)连续失败 2 次后第 3 次熔断拒绝;样本表类错误直接升级人工,不计熔断。create_envs_only=true 时用 --conda-create-envs-only 预建全部 conda 环境(不跑任务),用于正式运行前排掉环境构建失败。',
+      '封装 snakemake -n:验证流程组合定义正确性,不真正执行。结果自动写入运行台账(失败时带归一化报错签名与分桶),是 submit_cluster 的前置硬约束(按 task_id + targets + workdir + 执行对象摘要匹配)。同一报错签名(retryable/unknown 桶)连续失败 2 次后,同一调用不再实际执行第 3 次(熔断前置阻断,铁律 6);样本表类错误直接升级人工,不计熔断。create_envs_only=true 时用 --conda-create-envs-only 预建全部 conda 环境(不跑任务),用于正式运行前排掉环境构建失败。',
     inputSchema: z.object({
       ...taskFields,
       create_envs_only: z.boolean().optional().describe('true 时预建 conda 环境(--conda-create-envs-only),不执行任务'),
@@ -150,9 +157,23 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
       if (invalid) return { ok: false, refused: true, error: invalid };
       let cwd: string;
       try {
-        cwd = safeJoin(root, workdir ?? '.');
+        cwd = safeJoinResolved(root, workdir ?? '.');
       } catch (e) {
         return { ok: false, error: String(e) };
+      }
+      // 熔断前置阻断(架构评审 §4.4):同一调用(task_id+targets+workdir)上次失败签名已计 2 次,
+      // 再实际执行必然熔断——直接拒绝,不再跑第 3 次。解除:计划变更(新 task_id 重新 dry-run)或人工清台账。
+      const armed = lastCountedFailure(root, task_id, targets, workdir ?? '.');
+      if (armed && armed.count >= 2) {
+        return {
+          ok: false,
+          refused: true,
+          breaker: 'armed',
+          signature: armed.signature,
+          bucket: armed.bucket,
+          failure_count: armed.count,
+          reason: `熔断前置阻断(铁律 6):本调用与上次失败完全一致(task_id+targets+workdir),归一化报错签名「${armed.signature}」已失败 ${armed.count} 次,不再实际执行第 ${armed.count + 1} 次。把报错原文、已试方案、log 摘要整理报告给用户;修复后请用新 task_id 重新 dry_run(计划变更即解除),或人工清除台账中的失败记录后重试。`,
+        };
       }
       const args = ['-n', '--cores', '1', ...condaArgs];
       if (create_envs_only && cfg.useConda) args.push('--conda-create-envs-only');
@@ -163,6 +184,10 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
       });
       const ok = code === 0;
       const output = tail(stdout + '\n' + stderr, 100);
+
+      // 执行对象摘要:随 dry_run 记录落账,submit 时核对「跑的内容 = 批的内容」(架构评审 §4.2);
+      // task_id 使 AnalysisPlan(agent/plans/<task_id>.analysis.yaml)纳入摘要
+      const digest = computeExecutionSpecDigestSync(root, workdir ?? '.', targets, task_id);
 
       // 报错分类 + 熔断计数(审核手册阶段 1 第 2 项)
       let cls: ReturnType<typeof classifyError> | null = null;
@@ -180,6 +205,7 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
         result: ok ? 'success' : 'failed',
         detail: tail(output, 20),
         ...(cls ? { signature: cls.signature, bucket: cls.bucket } : {}),
+        spec_digest: digest,
         mode,
       });
 
@@ -233,7 +259,7 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
       if (invalid) return { ok: false, refused: true, error: invalid };
       let cwd: string;
       try {
-        cwd = safeJoin(root, workdir ?? '.');
+        cwd = safeJoinResolved(root, workdir ?? '.');
       } catch (e) {
         return { ok: false, error: String(e) };
       }
@@ -277,7 +303,7 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
     execute: async ({ path: rel, tail_lines }) => {
       let abs: string;
       try {
-        abs = safeJoin(root, rel);
+        abs = safeJoinResolved(root, rel); // realpath 校验:防 logs/ 下软链指向仓库外
       } catch (e) {
         return { ok: false, error: String(e) };
       }
@@ -286,12 +312,163 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
     },
   });
 
+  /**
+   * 运行状态查询(架构评审 §7.5「持久任务状态/完成事件/post-run manifest」):
+   * 从台账找本次任务的提交(started)记录,解析提交日志末尾的退出码行,给出
+   * running / succeeded / failed / lost 四种状态;已结束时把 run_state.json 与
+   * post_run_manifest.json(实际产物存在性/大小/退出码/日志尾)固化到
+   * runs/<task_id>/<run_id>/,并把完成事件落台账(同一 run_id 只落一次)。
+   */
+  const check_run = tool({
+    description:
+      '查询已提交运行的状态:返回 running/succeeded/failed/lost/unknown、退出码与各 target 产物是否落盘;已结束时自动固化 run_state.json 与 post_run_manifest.json 到 runs/<task_id>/<run_id>/ 并把完成事件写入台账。Slurm 作业从日志解析作业 ID 后用 squeue 探活。submit_cluster 之后用它跟踪进度与收尾,代替人工 read_log 对退出码;定位具体 rule 报错时再用 read_log。',
+    inputSchema: z.object({
+      task_id: z.string().describe('任务 ID(submit_cluster 用过的同一个)'),
+      run_id: z.string().optional().describe('可选:指定某次提交(缺省查最近一次)'),
+    }),
+    execute: async ({ task_id, run_id }) => {
+      if (!TASK_ID_RE.test(task_id)) return { ok: false, error: `task_id 非法: "${task_id}"` };
+      const entries = readLedger(root).filter(
+        (e) => e.op === 'submit' && e.result === 'started' && e.task_id === task_id && (!run_id || e.run_id === run_id),
+      );
+      const last = entries[entries.length - 1];
+      if (!last) {
+        return { ok: false, error: `台账中不存在 task_id=${task_id}${run_id ? ` run_id=${run_id}` : ''} 的提交(started)记录` };
+      }
+      const m = /pid=(-?\d+)\s+log=(\S+)(?:\s+run_id=(\S+))?/.exec(last.detail ?? '');
+      const logRel = m?.[2];
+      const rid = run_id ?? m?.[3] ?? null;
+      if (!logRel) return { ok: false, error: '提交记录缺少日志路径,无法定位运行' };
+
+      // 已有固化终态直接返回(重复查询不产生重复完成事件);running 状态不缓存,继续解析日志
+      const runDir = rid ? path.join(root, 'runs', task_id.replace(/[^\w-]/g, '_'), rid) : null;
+      const stateFile = runDir ? path.join(runDir, 'run_state.json') : null;
+      if (stateFile && fs.existsSync(stateFile)) {
+        const cached = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as { status?: string; exit_code?: number };
+        if (cached.status && cached.status !== 'running') {
+          return { ok: true, task_id, run_id: rid, status: cached.status, exit_code: cached.exit_code, cached: true };
+        }
+      }
+
+      let abs: string;
+      try {
+        abs = safeJoinResolved(root, logRel);
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+      let exitCode: number | null = null;
+      let logText = '';
+      if (fs.existsSync(abs)) {
+        logText = fs.readFileSync(abs, 'utf8');
+        const em = /\[flowagent\] snakemake exited, code=(\d+)/.exec(logText);
+        if (em) exitCode = Number(em[1]);
+      }
+      const targets = (last.target ?? '').split(' ').filter(Boolean);
+      const outputs = targets.map((rel) => {
+        const p = safeJoin(root, rel);
+        const present = fs.existsSync(p);
+        return { target: rel, present, ...(present ? { size: fs.statSync(p).size } : {}) };
+      });
+
+      let status: string;
+      if (exitCode !== null) {
+        status = exitCode === 0 ? 'succeeded' : 'failed';
+      } else {
+        // Slurm 路径:--parsable 作业 ID 在日志首行(或 "Submitted batch job <id>"),用 squeue 探活;
+        // 本地路径:提交进程 pid 探活
+        const jobId =
+          /Submitted batch job (\d+)/.exec(logText)?.[1] ?? (logText.trim() ? (/^(\d+)\s*$/m.exec(logText)?.[1] ?? null) : null);
+        if (jobId) {
+          const alive = slurmJobAlive(jobId);
+          status = alive === true ? 'running' : alive === false ? 'lost' : 'unknown';
+        } else {
+          const pid = Number(m?.[1] ?? -1);
+          let alive = false;
+          if (pid > 0) {
+            try {
+              process.kill(pid, 0);
+              alive = true;
+            } catch {
+              alive = false;
+            }
+          }
+          status = alive ? 'running' : 'lost'; // 无退出码行且进程已死:运行失联(kill -9/机器重启)
+        }
+      }
+      if (status === 'running') {
+        return { ok: true, task_id, run_id: rid, status, pid: Number(m?.[1]), note: '运行中:作业仍在队列/运行,稍后再次调用 check_run。' };
+      }
+      if (status === 'unknown') {
+        return { ok: true, task_id, run_id: rid, status, note: '无法判定:squeue 不可用且日志无退出码行,请人工核对作业状态。' };
+      }
+
+      const finishedAt = new Date().toISOString();
+      const present = outputs.filter((o) => o.present).length;
+      if (runDir) {
+        // 持久任务状态 + post-run manifest(评审 §7.5:实际产物/退出码/结果状态)
+        fs.mkdirSync(runDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(runDir, 'run_state.json'),
+          JSON.stringify(
+            {
+              run_id: rid,
+              task_id,
+              status,
+              pid: m ? Number(m[1]) : null,
+              exit_code: exitCode,
+              log: logRel,
+              started_at: last.ts,
+              finished_at: finishedAt,
+              outputs_present: `${present}/${outputs.length}`,
+            },
+            null,
+            2,
+          ) + '\n',
+        );
+        fs.writeFileSync(
+          path.join(runDir, 'post_run_manifest.json'),
+          JSON.stringify(
+            {
+              run_id: rid,
+              task_id,
+              exit_code: exitCode,
+              finished_at: finishedAt,
+              targets: outputs,
+              log_tail: fs.existsSync(abs) ? tail(fs.readFileSync(abs, 'utf8'), 20) : null,
+            },
+            null,
+            2,
+          ) + '\n',
+        );
+      }
+      // 完成事件落台账(同一 run_id 只落一次);无 run_id 的旧记录不落,避免轮询刷账
+      if (rid) {
+        const alreadyLogged = readLedger(root).some((e) => e.op === 'submit' && e.result === 'finished' && e.run_id === rid);
+        if (!alreadyLogged) {
+          appendLedger(root, {
+            ts: finishedAt,
+            task_id,
+            op: 'submit',
+            target: last.target,
+            object: last.object,
+            result: 'finished',
+            detail: `exit_code=${exitCode} outputs=${present}/${outputs.length}`,
+            run_id: rid,
+            spec_digest: last.spec_digest,
+            mode,
+          });
+        }
+      }
+      return { ok: true, task_id, run_id: rid, status, exit_code: exitCode, outputs, log: logRel };
+    },
+  });
+
   /** shell 单引号转义:把参数安全地拼进 bash -c 脚本 */
   const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
   const submit_cluster = tool({
     description:
-      '正式提交运行(硬约束工具)。三道闸:① 台账中必须存在本任务(task_id+targets+workdir 完全一致)的 dry_run 成功记录;② 台账中必须存在用户通过 confirm_submit 产生且未被消费的人工确认记录(每次提交消耗一次,续跑需再次确认;模型无权代填);③ 服务端需开启 FLOWAGENT_ALLOW_SUBMIT。提交为后台进程,固定带 --rerun-incomplete 与 --cores <部署配置>(LLM 不可改,本地资源护栏),结束后 snakemake 退出码追加到提交日志末尾。OOM 后重试可用 set_resources(白名单 mem_mb/disk_mb/threads/runtime)与 retries(1~3)调资源;提交成功后自动固化 run bundle(runs/<task_id>/bundle/)。',
+      '正式提交运行(硬约束工具)。三道闸:① 台账中必须存在本任务(task_id+targets+workdir 一致且执行对象摘要匹配)的 dry_run 成功记录;② 台账中必须存在用户通过 confirm_submit 产生且未被消费的人工确认记录(每次提交消耗一次,续跑需再次确认;模型无权代填);③ 服务端需开启 FLOWAGENT_ALLOW_SUBMIT。提交走执行器(executor 配置:local=本地后台 / slurm=sbatch 集群;slurm 环境自检失败即拒绝,不退回 local),固定带 --rerun-incomplete 与 --cores <部署配置>(LLM 不可改,本地资源护栏),结束后 snakemake 退出码追加到提交日志末尾。OOM 后重试可用 set_resources(白名单 mem_mb/disk_mb/threads/runtime)与 retries(1~3)调资源;提交成功后自动固化 run bundle 与初始 run_state(runs/<task_id>/<run_id>/),运行跟踪用 check_run。',
     inputSchema: z.object({
       ...taskFields,
       reason: z.string().describe('本次提交的理由(如:dry-run 已通过、用户已确认规模),落台账审计'),
@@ -310,18 +487,26 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
       }
       const resErr = validateSetResources(set_resources);
       if (resErr) return { ok: false, refused: true, reason: `set_resources 参数非法: ${resErr}` };
-      if (!hasSuccessfulDryRun(root, task_id, targets, wd)) {
+
+      // 闸 1/2 升级为摘要绑定(架构评审 §4.2):不再只问「有没有记录」,
+      // 而是核对 dry_run/人工确认所绑定的执行对象摘要与当前内容是否一致。
+      const dryDigests = successfulDryRunDigests(root, task_id, targets, wd);
+      if (dryDigests.size === 0) {
+        const everDryRun = hasSuccessfulDryRun(root, task_id, targets, wd);
         return {
           ok: false,
           refused: true,
-          reason: `台账(agent/run_ledger.jsonl)中不存在 task_id=${task_id}、相同 targets 且相同 workdir(${wd})的 dry_run 成功记录。铁律 2:dry-run 未通过禁止提交。请先对完全一致的 task_id/targets/workdir 调用 dry_run。`,
+          reason: everDryRun
+            ? `台账中本任务虽有 dry_run 成功记录,但其执行对象摘要与当前内容不一致(组合/config/样本表/rule 库在 dry-run 后有变动)。请先对当前内容重新调用 dry_run,再确认、提交。`
+            : `台账(agent/run_ledger.jsonl)中不存在 task_id=${task_id}、相同 targets 且相同 workdir(${wd})的 dry_run 成功记录。铁律 2:dry-run 未通过禁止提交。请先对完全一致的 task_id/targets/workdir 调用 dry_run。`,
         };
       }
-      if (!hasApproval(root, task_id, targets, wd)) {
+      const apprDigests = approvedDigests(root, task_id, targets, wd);
+      if (apprDigests.size === 0) {
         return {
           ok: false,
           refused: true,
-          reason: `台账中不存在 task_id=${task_id}、相同 targets 且相同 workdir(${wd})的用户人工确认记录。请先调用 confirm_submit 把计算规模交给用户本人确认;用户在对话中的口头同意不算数。`,
+          reason: `台账中不存在 task_id=${task_id}、相同 targets、相同 workdir(${wd})且与当前内容摘要一致的用户人工确认记录。请先调用 confirm_submit 把计算规模交给用户本人确认;用户在对话中的口头同意不算数。`,
         };
       }
       if (!hasUnconsumedApproval(root, task_id, targets, wd)) {
@@ -329,6 +514,28 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
           ok: false,
           refused: true,
           reason: `task_id=${task_id} 的人工确认已被消费:每次正式提交消耗一次确认记录,一次 y/N 只放行一次 submit。续跑/重试请再次调用 confirm_submit 交用户本人确认(修复后的规模可能已变)。`,
+        };
+      }
+      let digest: string;
+      try {
+        digest = computeExecutionSpecDigestSync(root, wd, targets, task_id);
+      } catch (e) {
+        return { ok: false, refused: true, reason: `执行对象摘要计算失败,按安全策略阻断提交: ${e}` };
+      }
+      if (!dryDigests.has(digest)) {
+        return {
+          ok: false,
+          refused: true,
+          reason:
+            '当前执行对象摘要与 dry_run 成功记录绑定的不一致(组合/config/样本表/rule 库在 dry-run 后有变动)。铁律:检查、审批、提交必须针对同一内容,请先重新 dry_run。',
+        };
+      }
+      if (!apprDigests.has(digest)) {
+        return {
+          ok: false,
+          refused: true,
+          reason:
+            '当前执行对象摘要与人工确认时绑定的不一致(确认后组合/config/样本表/rule 库有变动)。请重新调用 confirm_submit 把最新规模交给用户本人确认。',
         };
       }
       if (!cfg.allowSubmit) {
@@ -340,13 +547,29 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
       }
       let cwd: string;
       try {
-        cwd = safeJoin(root, wd);
+        cwd = safeJoinResolved(root, wd);
       } catch (e) {
         return { ok: false, error: String(e) };
       }
+      // 执行器(架构评审 §7.6):local=本地后台;slurm=sbatch(环境自检失败即拒绝,不退回 local)
+      let executor: FlowExecutor;
+      try {
+        executor = createExecutor(cfg);
+      } catch (e) {
+        return { ok: false, refused: true, reason: `执行器不可用,阻断提交: ${e}` };
+      }
 
-      // run bundle 固化(阶段 2:rule 库版本 + 组合副本 + config/样本表副本)
-      const bundle = await createRunBundle(root, task_id, wd);
+      // run bundle 固化(评审 §4.3):每次提交独立 run_id 目录;固化失败即阻断,不再静默提交。
+      // 以下到台账落账全部为同步操作,堵住「校验通过 → 记录消费」之间的并发窗口(评审 §4.2)。
+      let bundle: string;
+      let runId: string;
+      try {
+        const b = createRunBundle(root, task_id, wd, targets);
+        bundle = b.rel;
+        runId = b.run_id;
+      } catch (e) {
+        return { ok: false, refused: true, reason: `运行快照固化失败,按可复现性策略阻断本次提交: ${e}` };
+      }
 
       // task_id 已过 validateTaskArgs(不含 / 与 ..):拼接进日志路径不会越出仓库根(安全审查 H2)
       const logFile = path.join(root, 'logs', 'flowagent', `submit-${task_id}-${Date.now()}.log`);
@@ -363,7 +586,7 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
       smkArgs.push(...targets);
       // bash 包一层:结束后把 snakemake 退出码追加到同一份提交日志,供 read_log / 台账对账
       const script = `snakemake ${smkArgs.map(shq).join(' ')}; c=$?; echo "[flowagent] snakemake exited, code=$c" >> ${shq(logFile)}; exit $c`;
-      const pid = spawnDetached('bash', ['-c', script], { cwd, logFile });
+      const pid = executor.spawn({ cwd, logFile, script, cores: cfg.cores, taskId: task_id });
       appendLedger(root, {
         ts: new Date().toISOString(),
         task_id,
@@ -371,20 +594,38 @@ export function createSnakemakeTools(cfg: FlowAgentConfig, mode: AgentMode = 'st
         target: targets.join(' '),
         object: wd,
         result: 'started',
-        detail: `pid=${pid} log=${path.relative(root, logFile)}`,
+        detail: `pid=${pid} log=${path.relative(root, logFile)} run_id=${runId} executor=${executor.kind}`,
         reason,
-        ...(bundle ? { bundle } : {}),
+        bundle,
+        run_id: runId,
+        spec_digest: digest,
         mode,
       });
+      // 初始持久状态(running):断线/重启后 check_run 凭台账 + 日志恢复,任务不丢(评审 §7.5)
+      try {
+        const runDir = path.join(root, 'runs', task_id.replace(/[^\w-]/g, '_'), runId);
+        fs.mkdirSync(runDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(runDir, 'run_state.json'),
+          JSON.stringify(
+            { run_id: runId, task_id, status: 'running', executor: executor.kind, pid, log: path.relative(root, logFile), started_at: new Date().toISOString() },
+            null,
+            2,
+          ) + '\n',
+        );
+      } catch {
+        // 状态文件写失败不阻断已授权的提交,check_run 解析日志时会重建
+      }
       return {
         ok: true,
         pid,
+        run_id: runId,
         log_file: path.relative(root, logFile),
-        ...(bundle ? { bundle } : {}),
+        bundle,
         note: '已后台提交(带 --rerun-incomplete)。用 read_log 跟踪进度;结束时日志末尾有退出码行。失败时读对应 rule 日志修复后重新 submit(仍为断点续跑);OOM 可用 set_resources 加内存,retries 应对瞬断。',
       };
     },
   });
 
-  return { dry_run, detailed_summary, read_log, submit_cluster, confirm_submit };
+  return { dry_run, detailed_summary, read_log, check_run, submit_cluster, confirm_submit };
 }

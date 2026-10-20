@@ -59,12 +59,15 @@ function resolveDotted(obj: unknown, key: string): { found: boolean; value?: unk
 }
 
 /**
- * 校验 config(组合目录的 config 副本)是否满足全库声明的 schema。
- * 只校验 schema 已声明且 config 中存在的 key;缺 key 报 warning(dry_run 的 KeyError 会兜底)。
+ * 校验 config 是否满足 schema 声明。
+ * 只校验 schema 已声明且 config 中存在的 key 的类型/枚举/范围/pattern;
+ * 缺 key:默认 warning(不影响本运行的 rule 不强制),requiredRules 给定时,
+ * 选中 rule(架构评审:校验有效合并配置)的必需字段缺失升级为 error。
  */
 export function checkConfigAgainstSchemas(
   config: unknown,
   schemas: ConfigSchema[],
+  opts?: { requiredRules?: Set<string> },
 ): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -72,7 +75,12 @@ export function checkConfigAgainstSchemas(
     const where = `config['${s.key}']`;
     const { found, value } = resolveDotted(config, s.key);
     if (!found) {
-      warnings.push(`${where}: schema 已声明但 config 缺少该 key(${s.sourceRef})——dry_run 时将 KeyError`);
+      const ruleName = /#rules\[name=([^\]]+)\]/.exec(s.sourceRef)?.[1];
+      if (opts?.requiredRules && ruleName && opts.requiredRules.has(ruleName)) {
+        errors.push(`${where}: 选中 rule 的必需字段缺失(${s.sourceRef})——请在 config 副本补该 key`);
+      } else {
+        warnings.push(`${where}: schema 已声明但 config 缺少该 key(${s.sourceRef})——dry_run 时将 KeyError`);
+      }
       continue;
     }
     if (s.type && s.type !== 'any') {
@@ -109,6 +117,128 @@ export function checkConfigAgainstSchemas(
 /** config_requires 条目(字符串或 schema 对象)→ 顶层 key(供 smk 覆盖率比对) */
 function requireKey(c: unknown): string {
   return typeof c === 'string' ? c : typeof (c as any)?.key === 'string' ? (c as any).key : '';
+}
+
+/**
+ * 从组合 Snakefile 提取选中的 rule 名(架构评审:校验有效合并配置只针对选中子图):
+ *   use rule X from m  → X
+ *   use rule * from m  → m 的 snakefile 对应 manifest 的全部 rule
+ * 返回空集表示未能解析出选中集合(调用方应退回「缺 key 只 warning」的旧行为)。
+ */
+export function selectedRuleNames(root: string, composedDir: string, snakefileText: string): Set<string> {
+  const moduleSnakefile = new Map<string, string>();
+  let curMod: string | null = null;
+  for (const line of snakefileText.split('\n')) {
+    const mm = /^\s*module\s+([A-Za-z_]\w*)\s*:/.exec(line);
+    if (mm) {
+      curMod = mm[1];
+      continue;
+    }
+    const ms = /^\s*snakefile:\s*"([^"]+)"/.exec(line);
+    if (ms && curMod) {
+      moduleSnakefile.set(curMod, path.relative(root, path.resolve(composedDir, ms[1])));
+      curMod = null;
+    }
+  }
+  const manifests = loadManifests(root);
+  const selected = new Set<string>();
+  for (const m of snakefileText.matchAll(/use\s+rule\s+([A-Za-z_*][\w*]*)\s+from\s+([A-Za-z_]\w*)/g)) {
+    const [, name, mod] = m;
+    if (name === '*') {
+      const smk = moduleSnakefile.get(mod);
+      const mf = manifests.find((x) => x.snakefile === smk);
+      if (mf) for (const r of mf.rules) selected.add(r.name);
+    } else {
+      selected.add(name);
+    }
+  }
+  return selected;
+}
+
+export function deepMerge(a: unknown, b: unknown): unknown {
+  if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b)) {
+    const out: Record<string, unknown> = { ...(a as Record<string, unknown>) };
+    for (const [k, v] of Object.entries(b as Record<string, unknown>)) out[k] = deepMerge(out[k], v);
+    return out;
+  }
+  return b === undefined ? a : b;
+}
+
+/**
+ * 有效合并配置(架构评审「校验有效合并配置」):
+ * 仓库 config/config.yaml + envs/general_software.yaml(组合 Snakefile 的第二 configfile),
+ * 再叠加组合目录的 config.yaml 副本。校验必须针对这份合并结果,而不是只看副本。
+ */
+export function mergedEffectiveConfig(root: string, overrideFile: string | null): unknown {
+  let cfg: unknown = {};
+  for (const f of [path.join(root, 'config', 'config.yaml'), path.join(root, 'envs', 'general_software.yaml')]) {
+    if (fs.existsSync(f)) cfg = deepMerge(cfg, readYaml(f) ?? {});
+  }
+  if (overrideFile && fs.existsSync(overrideFile)) cfg = deepMerge(cfg, readYaml(overrideFile) ?? {});
+  return cfg;
+}
+
+/**
+ * 选中子图闭合校验(架构评审 §7.3「选中子图的完整计划校验」最小实现):
+ * 选中集合(use rule 引用)内每个 rule 的 input 端口,必须由集合内另一 rule 产出,
+ * 或在 agent/ports.yaml 登记 external: true(外部输入);targets 给定时,每个 target
+ * 还必须能被集合内某 rule 的 output pattern 匹配(显式路径绑定)。
+ * 否则组合即使语法合法,dry-run 也必然 MissingInput——在计划/校验阶段以 error 拒绝。
+ */
+export function checkSelectedSubgraphClosure(
+  root: string,
+  selected: Set<string>,
+  targets?: string[],
+): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (selected.size === 0) return { errors, warnings };
+  const byName = new Map<string, { rule: any; ref: string }[]>();
+  for (const m of loadManifests(root)) {
+    for (const r of m.rules) {
+      const arr = byName.get(r.name) ?? [];
+      arr.push({ rule: r, ref: `${m.sourceRef}#rules[name=${r.name}]` });
+      byName.set(r.name, arr);
+    }
+  }
+  const selectedDefs: { rule: any; ref: string }[] = [];
+  for (const name of selected) {
+    const defs = byName.get(name);
+    if (!defs) {
+      warnings.push(`选中 rule ${name} 在库中不存在(可能引用未入库提案或已下架 rule)`);
+      continue;
+    }
+    selectedDefs.push(...defs);
+  }
+  const produced = new Set<string>();
+  const outputPatterns: { pattern: string; ref: string }[] = [];
+  for (const d of selectedDefs) {
+    for (const o of d.rule.outputs ?? []) {
+      if (!o.port) continue;
+      produced.add(o.port);
+      if (typeof (o as any).pattern === 'string') outputPatterns.push({ pattern: (o as any).pattern, ref: d.ref });
+    }
+  }
+  const portsFile = path.join(root, 'agent', 'ports.yaml');
+  const registered = fs.existsSync(portsFile)
+    ? (((readYaml(portsFile) as any)?.ports ?? {}) as Record<string, any>)
+    : {};
+  for (const d of selectedDefs) {
+    for (const i of d.rule.inputs ?? []) {
+      if (!i.port || produced.has(i.port)) continue;
+      if (registered[i.port]?.external === true) continue;
+      errors.push(
+        `选中子图不闭合:端口 ${i.port}(${d.ref} 消费)在选中集合内无生产者,且未在 agent/ports.yaml 登记 external——该组合 dry-run 必然 MissingInput`,
+      );
+    }
+  }
+  // 显式路径绑定:target 必须能被集合内产出 pattern 匹配(PipelinePlan 编译路径传入)
+  for (const t of targets ?? []) {
+    if (!outputPatterns.some(({ pattern }) => patternToRegex(pattern).test(t))) {
+      errors.push(`target 无生产者: ${t} 不匹配选中集合内任何 rule 的 output pattern——交付目标与所选 rule 脱节`);
+    }
+  }
+  return { errors, warnings };
 }
 
 // ---------- 内置一致性检查 ----------
@@ -220,35 +350,89 @@ async function runLint(root: string): Promise<string[]> {
     .map((l) => `lint: ${l}`);
 }
 
+/**
+ * 生产 rule 的 bootstrap 契约(架构评审 §7.4):把运行期隐式依赖显式化为入库/组合前校验,
+ * 避免「凭 demo 推断所有真实流程可组合」。当前契约:
+ *  1. 样本表:任一 rule per_sample / expand_over=samples → config/samples.csv 必须存在且含 sample 列;
+ *  2. conda 环境:manifest 声明的 env 文件必须存在于仓库内(相对仓库根解析);
+ *  3. resources_tier 应显式声明(缺失仅 warning,资源档位汇总记 unknown)。
+ */
+export function checkBootstrapContracts(root: string): { issues: string[]; warnings: string[] } {
+  const issues: string[] = [];
+  const warnings: string[] = [];
+  const manifests = loadManifests(root);
+  const needSamples = manifests.some((m) =>
+    m.rules.some(
+      (r) =>
+        r.per_sample === true ||
+        [...(r.inputs ?? []), ...(r.outputs ?? [])].some((io) => (io as { expand_over?: unknown }).expand_over === 'samples'),
+    ),
+  );
+  if (needSamples) {
+    const samplesFile = path.join(root, 'config', 'samples.csv');
+    if (!fs.existsSync(samplesFile)) {
+      issues.push('bootstrap 契约:库中存在 per-sample rule,但 config/samples.csv 不存在——样本表是运行期隐式依赖,缺失时 dry-run 直接 WildcardError');
+    } else {
+      const header = (fs.readFileSync(samplesFile, 'utf8').split('\n')[0] ?? '').split(',').map((c) => c.trim());
+      if (!header.includes('sample')) {
+        issues.push(`bootstrap 契约:config/samples.csv 表头缺少 sample 列(实际表头: ${header.join(',')})——per-sample 展开依赖该列`);
+      }
+    }
+  }
+  for (const m of manifests) {
+    for (const r of m.rules) {
+      const conda = (r as { conda?: unknown }).conda;
+      if (typeof conda === 'string' && conda.trim() && !fs.existsSync(path.join(root, conda))) {
+        issues.push(`bootstrap 契约:${m.sourceRef}#rules[name=${r.name}] 声明的 conda 环境不存在: ${conda}`);
+      }
+      if (typeof (r as { resources_tier?: unknown }).resources_tier !== 'string') {
+        warnings.push(`${m.sourceRef}#rules[name=${r.name}] 未声明 resources_tier——confirm 摘要的资源档位汇总将记为 unknown`);
+      }
+    }
+  }
+  return { issues, warnings };
+}
+
 export function createValidateTool(cfg: FlowAgentConfig, mode: AgentMode = 'standard') {
   const root = cfg.workflowRoot;
 
   const validate_manifests = tool({
     description:
-      '一致性校验(规范 §9.3/§4.1):manifest 与 .smk 漂移、端口登记、端口 pattern 完整性、catalog target 可匹配、config_requires 覆盖;workdir 指向组合目录时,对其 config.yaml 副本按全库 schema 做 JSON Schema 校验(类型/枚举/范围/pattern)。lint=true 时追加 snakemake --lint(仅 warning,入库门禁用)。仓库自带 agent/validate_manifests.py 时优先调用它。每次改动 manifest/组合文件后必须先跑。',
+      '一致性校验(规范 §9.3/§4.1):manifest 与 .smk 漂移、端口登记、端口 pattern 完整性、catalog target 可匹配、config_requires 覆盖、bootstrap 契约(per-sample rule 要求 config/samples.csv 含 sample 列、manifest 声明的 conda env 文件必须存在、resources_tier 应显式声明);workdir 指向组合目录时额外做两项计划级校验:① 「有效合并配置」(仓库 config/config.yaml + envs/general_software.yaml + 组合 config.yaml 副本)按全库 schema 校验,选中 rule(use rule 引用)的必需字段缺失按 error 拒绝;② 选中子图闭合——选中 rule 的每个 input 端口须由选中集合内生产者产出或登记 external: true,否则 error。未选中 rule 缺 key 仅 warning。lint=true 时追加 snakemake --lint(仅 warning,入库门禁用)。仓库自带 agent/validate_manifests.py 时优先调用它。每次改动 manifest/组合文件后必须先跑。',
     inputSchema: z.object({
       task_id: z.string().describe('任务 ID,写入台账'),
       workdir: z.string().optional().describe('组合目录(如 composed/20260908_xxx):对其 config.yaml 副本做 schema 校验'),
       lint: z.boolean().optional().describe('true 时追加 snakemake --lint(入库/大改后使用,较慢)'),
     }),
     execute: async ({ task_id, workdir, lint }) => {
-      // 组合 config 副本的 schema 校验(两种路径都执行)
+      // 组合目录的 schema 校验:对「有效合并配置」(仓库 config + 组合副本)按全库 schema 校验,
+      // 选中 rule(use rule 引用,含 use rule *)的必需字段缺失为 error,未选中仍为 warning。
       let configErrors: string[] = [];
       let configWarnings: string[] = [];
       if (workdir) {
-        let cfgFile: string;
+        let wAbs: string;
         try {
-          cfgFile = safeJoin(root, path.join(workdir, 'config.yaml'));
+          wAbs = safeJoin(root, workdir);
         } catch (e) {
           return { ok: false, error: String(e) };
         }
-        if (fs.existsSync(cfgFile)) {
-          const { schemas } = extractConfigSchemas(root);
-          const check = checkConfigAgainstSchemas(readYaml(cfgFile), schemas);
-          configErrors = check.errors;
-          configWarnings = check.warnings;
-        } else {
-          configWarnings.push(`${workdir}/config.yaml 不存在(组合未携带 config 副本,跳过 schema 校验)`);
+        const cfgFile = path.join(wAbs, 'config.yaml');
+        const snakeFile = path.join(wAbs, 'Snakefile');
+        const selected = fs.existsSync(snakeFile)
+          ? selectedRuleNames(root, wAbs, fs.readFileSync(snakeFile, 'utf8'))
+          : new Set<string>();
+        const { schemas } = extractConfigSchemas(root);
+        const check = checkConfigAgainstSchemas(mergedEffectiveConfig(root, cfgFile), schemas, {
+          requiredRules: selected.size ? selected : undefined,
+        });
+        configErrors = check.errors;
+        configWarnings = check.warnings;
+        // 选中子图端口闭合(评审 §7.3):input 端口须由选中集合内生产者供给或登记 external
+        const closure = checkSelectedSubgraphClosure(root, selected);
+        configErrors.push(...closure.errors);
+        configWarnings.push(...closure.warnings);
+        if (!fs.existsSync(cfgFile)) {
+          configWarnings.push(`${workdir}/config.yaml 不存在(无组合级覆盖,已按仓库 config 校验)`);
         }
       }
 
@@ -267,6 +451,10 @@ export function createValidateTool(cfg: FlowAgentConfig, mode: AgentMode = 'stan
         issues = r.issues;
         warnings = r.warnings;
       }
+      // bootstrap 契约独立于 runner(仓库自带 python 脚本时同样执行,评审 §7.4)
+      const boot = checkBootstrapContracts(root);
+      issues.push(...boot.issues);
+      warnings.push(...boot.warnings);
       if (lint) warnings.push(...(await runLint(root)));
 
       issues.push(...configErrors);

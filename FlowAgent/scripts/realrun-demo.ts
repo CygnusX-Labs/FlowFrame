@@ -7,6 +7,7 @@
 import { loadConfig } from '../src/config';
 import { createTools } from '../src/tools';
 import { appendLedger, hasSuccessfulDryRun, hasUnconsumedApproval } from '../src/ledger';
+import { computeExecutionSpecDigestSync } from '../src/spec-digest';
 
 const target = process.argv[2] ?? '01.qc/short_read_r1_multiqc/multiqc_r1_raw-data_report.html';
 const taskId = 'demo_realrun';
@@ -39,6 +40,7 @@ async function main() {
       object: '.',
       result: 'approved',
       detail: 'demo:run 脚本执行即人工确认 by=cli-user',
+      spec_digest: computeExecutionSpecDigestSync(cfg.workflowRoot, '.', [target]),
     });
   } else {
     console.log('[2/3] 台账已有本任务人工确认记录,跳过');

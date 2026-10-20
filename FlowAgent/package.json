@@ -10,7 +10,8 @@
     "selftest": "tsx scripts/selftest.ts",
     "eval": "tsx scripts/run-eval.ts",
     "demo:run": "tsx scripts/realrun-demo.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "eval:semantic": "tsx scripts/run-semantic-eval.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^1.0.0",

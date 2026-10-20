@@ -19,6 +19,18 @@ This repository contains the framework specification, development guides, templa
 | FlowAgent | Maps natural-language requirements to existing analysis capabilities, with tooling for plan retention, composition compilation, validation, human confirmation, execution, and audit | [Agent documentation](FlowAgent/README.md) |
 | Planning and onboarding | Defines rule/pipeline governance, validation, and version goals, plus the steps for onboarding a workflow | [Master plan](docs/planning/Flow-AI_Rule_Orchestration.md) · [Onboarding guide](docs/planning/Flow-Workflow-Onboarding-Guide.md) |
 
+## Workflows
+
+Flow-family workflows are developed and maintained in their own repositories:
+
+| Workflow | Repository |
+|---|---|
+| RNAFlow | [xsx123123/RNAFlow](https://github.com/xsx123123/RNAFlow) |
+| AnnoFlow | [xsx123123/kegg_annotation](https://github.com/xsx123123/kegg_annotation) |
+| ATACFlow | [xsx123123/ATACFlow](https://github.com/xsx123123/ATACFlow) |
+| WGSFlow | [xsx123123/WGSFlow](https://github.com/xsx123123/WGSFlow) |
+| TREEFlow | [xsx123123/TREEFlow](https://github.com/xsx123123/TREEFlow) |
+
 ## How it works
 
 ```text

@@ -19,6 +19,18 @@ FlowFrame 将多组学分析流程的开发规范与 AI 编排能力放在一起
 | FlowAgent | 将自然语言需求映射到已有分析能力，提供方案留存、组合编译、校验、人工确认、执行与审计工具 | [Agent 使用文档](../FlowAgent/README.md) |
 | 总体规划与入库手册 | 定义 rule/pipeline 治理、验证与版本目标，以及流程接入步骤 | [总体规划](planning/Flow-AI_Rule_Orchestration.md) · [入库手册](planning/Flow-Workflow-Onboarding-Guide.md) |
 
+## 已开发的流程
+
+以下流程基于 Flow Framework 开发，分别在各自的仓库中维护：
+
+| 流程 | 仓库 |
+|---|---|
+| RNAFlow | [xsx123123/RNAFlow](https://github.com/xsx123123/RNAFlow) |
+| AnnoFlow | [xsx123123/kegg_annotation](https://github.com/xsx123123/kegg_annotation) |
+| ATACFlow | [xsx123123/ATACFlow](https://github.com/xsx123123/ATACFlow) |
+| WGSFlow | [xsx123123/WGSFlow](https://github.com/xsx123123/WGSFlow) |
+| TREEFlow | [xsx123123/TREEFlow](https://github.com/xsx123123/TREEFlow) |
+
 ## 如何协作
 
 ```text

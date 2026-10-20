@@ -1,74 +1,76 @@
 <p align="center">
-  <img src="docs/蓝色基因数据分析图标.png" alt="Flow Framework 图标" width="160">
-  <img src="FlowAgent/docs/flowagent_logo_1.png" alt="FlowAgent Logo" width="160">
+  <img src="docs/蓝色基因数据分析图标.png" alt="Flow Framework icon" width="160">
+  <img src="FlowAgent/docs/flowagent_logo_1.png" alt="FlowAgent logo" width="160">
 </p>
 
 # FlowFrame
 
-FlowFrame 将多组学分析流程的开发规范与 AI 编排能力放在一起：**Flow Framework 负责让流程结构统一、依赖明确；FlowAgent 负责理解需求、复用已有 rule、生成候选方案并辅助验证与运行。** 计算任务由 Snakemake 执行，科学方案与正式运行由专家和授权策略把关。
+English | [中文](docs/README.zh-CN.md)
 
-本仓库包含框架规范、开发指引、模板资源和 Agent 后端。具体组学流程在各自的 `<X>Flow` 仓库中开发和维护。
+FlowFrame brings together development standards for multi-omics analysis workflows and AI orchestration: **Flow Framework keeps workflow structure consistent and dependencies explicit, while FlowAgent understands requirements, reuses existing rules, generates candidate plans, and assists with validation and execution.** Computational tasks run on Snakemake, and scientific decisions and formal runs are gated by domain experts and authorization policies.
 
-## 项目组成
+This repository contains the framework specification, development guides, template resources, and the Agent backend. Individual omics workflows are developed and maintained in their own `<X>Flow` repositories.
 
-| 组件 | 职责 | 入口 |
+## Components
+
+| Component | Responsibility | Entry points |
 |---|---|---|
-| Flow Framework | 定义目录、配置、rule、数据门控、资源管理、交付与报告规范，帮助开发和接入 Flow 家族流程 | [框架指南](flow-framework/README.md) · [完整规范](flow-framework/references/flow_framework_spec.md) |
-| FlowAgent | 将自然语言需求映射到已有分析能力，提供方案留存、组合编译、校验、人工确认、执行与审计工具 | [Agent 使用文档](FlowAgent/README.md) |
-| 总体规划与入库手册 | 定义 rule/pipeline 治理、验证与版本目标，以及流程接入步骤 | [总体规划](docs/planning/Flow-AI_Rule_Orchestration.md) · [入库手册](docs/planning/Flow-Workflow-Onboarding-Guide.md) |
+| Flow Framework | Defines standards for directory layout, configuration, rules, data gating, resource management, delivery, and reporting to help develop and onboard Flow-family workflows | [Framework guide](flow-framework/README.md) · [Full specification](flow-framework/references/flow_framework_spec.md) |
+| FlowAgent | Maps natural-language requirements to existing analysis capabilities, with tooling for plan retention, composition compilation, validation, human confirmation, execution, and audit | [Agent documentation](FlowAgent/README.md) |
+| Planning and onboarding | Defines rule/pipeline governance, validation, and version goals, plus the steps for onboarding a workflow | [Master plan](docs/planning/Flow-AI_Rule_Orchestration.md) · [Onboarding guide](docs/planning/Flow-Workflow-Onboarding-Guide.md) |
 
-## 如何协作
+## How it works
 
 ```text
-流程开发者 → Flow Framework 规范与模板 → <X>Flow 流程仓库
-                                           ↓ 入库校验与专家审核
-科研需求 → FlowAgent → 检索能力 → 分析方案与流程计划
-                                           ↓ 校验与人工确认
-                                     Snakemake 执行
+Workflow developers → Flow Framework standards & templates → <X>Flow repositories
+                                           ↓ onboarding checks & expert review
+Research requirements → FlowAgent → capability retrieval → analysis plan & workflow plan
+                                           ↓ validation & human confirmation
+                                     Snakemake execution
                                            ↓
-                                    分析产物、日志与运行记录
+                                    outputs, logs & run records
 ```
 
-Flow Framework 统一入口初始化、配置覆盖、模块依赖和目标生成，要求原始数据经过标准化与 MD5 门控，再进入组学分析和交付环节。
+Flow Framework provides a unified entry point for initialization, configuration overrides, module dependencies, and target generation. Raw data must pass standardization and MD5 gating before entering omics analysis and delivery.
 
-FlowAgent 通过 catalog、ports 和 manifests 理解流程能力。LLM 负责选择与解释，工具层负责约束校验、提交门禁和台账；新增或修改 rule 通过候选提案和人工审核进入能力库。
+FlowAgent understands workflow capabilities through catalogs, ports, and manifests. The LLM selects and explains; the tool layer enforces constraints, submission gates, and ledgers. New or modified rules enter the capability library through candidate proposals and human review.
 
-## 开始使用
+## Getting started
 
-**开发或改造流程**：从 [Flow Framework 指南](flow-framework/README.md) 开始，按 [完整规范](flow-framework/references/flow_framework_spec.md) 建立流程。供 AI 编程助手使用的开发指引见 [SKILL.md](flow-framework/SKILL.md)。
+**Developing or refactoring a workflow**: Start with the [Flow Framework guide](flow-framework/README.md) and follow the [full specification](flow-framework/references/flow_framework_spec.md) to set up your workflow. Development guidance for AI coding assistants is available in [SKILL.md](flow-framework/SKILL.md).
 
-**将流程接入 Agent**：按 [流程入库手册](docs/planning/Flow-Workflow-Onboarding-Guide.md) 准备 manifests、端口与交付物目录，完成校验和真实小样验收，再设置 `FLOW_WORKFLOW_ROOT` 指向流程仓库。
+**Onboarding a workflow to the Agent**: Follow the [workflow onboarding guide](docs/planning/Flow-Workflow-Onboarding-Guide.md) to prepare manifests, ports, and deliverable directories, complete validation and real small-sample acceptance, then set `FLOW_WORKFLOW_ROOT` to point at the workflow repository.
 
-**体验 Agent 后端**：
+**Trying the Agent backend**:
 
 ```bash
 cd FlowAgent
 npm install
 cp .env.example .env
-# 编辑 .env，配置模型接口、API Key 和模型 ID
+# edit .env to configure the model endpoint, API key, and model ID
 npm run cli
 ```
 
-未设置 `FLOW_WORKFLOW_ROOT` 时使用内置 demo。HTTP 服务、人工确认、模型配置与执行器的使用说明见 [FlowAgent README](FlowAgent/README.md)。
+When `FLOW_WORKFLOW_ROOT` is not set, the built-in demo is used. See the [FlowAgent README](FlowAgent/README.md) for the HTTP service, human confirmation, model configuration, and executors.
 
-## 当前进展
+## Status
 
-当前 Agent 已提供 CLI/HTTP 接口、标准与专家模式、能力检索、最小科学方案、结构化组合编译、配置与子图检查、dry-run、人工确认、运行快照及状态查询，并包含 local/Slurm 执行器接口。
+The Agent currently provides CLI/HTTP interfaces, standard and expert modes, capability retrieval, minimal scientific plans, structured composition compilation, configuration and subgraph checks, dry-run, human confirmation, run snapshots, and status queries, along with local/Slurm executor interfaces.
 
-整体仍处于受控试点阶段。完整的不可变 rule/pipeline 发布、依赖与参考锁、独立科学审核和结果质量验证仍需完善；demo 与工具测试不能替代真实流程的端到端验收。当前实现与目标的具体差距见 [规划对照审查](docs/info/FlowAgent_Planning_Alignment_2026-10-16.md)。
+Overall, the project remains in a controlled pilot stage. Fully immutable rule/pipeline releases, dependency and reference locking, independent scientific review, and result-quality validation still need work; demos and tooling tests cannot replace end-to-end acceptance of real workflows. See the [planning alignment review](docs/info/FlowAgent_Planning_Alignment_2026-10-16.md) for the specific gaps between the current implementation and the target.
 
-## 仓库导航
+## Repository layout
 
 ```text
 FlowFrame/
-├── flow-framework/       # 流程开发指引、完整规范和模板
-├── FlowAgent/            # AI 编排后端、demo 与评测脚本
+├── flow-framework/       # workflow development guides, full specification, and templates
+├── FlowAgent/            # AI orchestration backend, demos, and evaluation scripts
 ├── docs/
-│   ├── planning/         # 总体规划与流程入库手册
-│   └── info/             # 架构评审与实现对照
+│   ├── planning/         # master plan and workflow onboarding guide
+│   └── info/             # architecture reviews and implementation alignment
 └── LICENSE               # MIT License
 ```
 
-## 许可证
+## License
 
-本项目采用 [MIT License](LICENSE)。引用的第三方工具与依赖遵循各自的许可证。
+This project is licensed under the [MIT License](LICENSE). Referenced third-party tools and dependencies follow their respective licenses.

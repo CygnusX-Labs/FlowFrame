@@ -86,3 +86,8 @@ FlowFrame/
 ## License
 
 This project is licensed under the [MIT License](LICENSE). Referenced third-party tools and dependencies follow their respective licenses.
+
+<p align="center">
+  <img src="docs/Slogo.png" alt="CygnusX research ecosystem" width="1100">
+</p>
+

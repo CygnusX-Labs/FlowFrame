@@ -25,8 +25,8 @@ Flow-family workflows are developed and maintained in their own repositories:
 
 | Workflow | Repository |
 |---|---|
-| RNAFlow | [xsx123123/RNAFlow](https://github.com/xsx123123/RNAFlow) |
-| AnnoFlow | [xsx123123/kegg_annotation](https://github.com/xsx123123/kegg_annotation) |
+| RNAFlow | [xsx123123/RNAFlow](https://github.com/CygnusX-Labs/RNAFlow) |
+| AnnoFlow | [xsx123123/kegg_annotation](https://github.com/CygnusX-Labs/AnnoFlow) |
 | ATACFlow | [xsx123123/ATACFlow](https://github.com/xsx123123/ATACFlow) |
 | WGSFlow | [xsx123123/WGSFlow](https://github.com/xsx123123/WGSFlow) |
 | TREEFlow | [xsx123123/TREEFlow](https://github.com/xsx123123/TREEFlow) |
